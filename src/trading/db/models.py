@@ -152,6 +152,14 @@ class Candle(Base):
         ),
         CheckConstraint("volume >= 0", name="volume_nonnegative"),
         Index("ix_candles_pair_timeframe_timestamp", "pair_id", "timeframe", "timestamp"),
+        Index(
+            "ix_candles_pit_replay",
+            "pair_id",
+            "timeframe",
+            "source",
+            "available_at",
+            "timestamp",
+        ),
         Index("ix_candles_available_at", "available_at"),
     )
 

@@ -7,7 +7,6 @@ import argparse
 import json
 import sys
 import tempfile
-from datetime import datetime
 from pathlib import Path
 
 src_path = Path(__file__).resolve().parents[1] / "src"
@@ -16,40 +15,11 @@ if str(src_path) not in sys.path:
 
 from trading.core.settings import Settings
 from trading.data.archive import write_raw_parquet
-from trading.data.market import RawOhlcvBatch, parse_timestamp
+from trading.data.market import parse_timestamp
+from trading.data.offline import OhlcvFixtureSpec, load_raw_ohlcv_jsonl
 from trading.data.quality import deterministic_dataset_hash, normalize_ohlcv_batch
 from trading.db.session import create_db_engine, create_session_factory
 from trading.services.ingestion import DuplicateCandleError, IngestionService
-
-
-def load_jsonl_dataset(
-    path: Path,
-    *,
-    symbol: str,
-    timeframe: str,
-    fetched_at: datetime,
-) -> RawOhlcvBatch:
-    rows = []
-    with path.open("r", encoding="utf-8") as file:
-        for line in file:
-            item = json.loads(line)
-            rows.append(
-                [
-                    item["timestamp"],
-                    item["open"],
-                    item["high"],
-                    item["low"],
-                    item["close"],
-                    item["volume"],
-                ]
-            )
-    return RawOhlcvBatch(
-        exchange="binance",
-        symbol=symbol,
-        timeframe=timeframe,
-        rows=rows,
-        fetched_at=fetched_at,
-    )
 
 
 def main() -> None:
@@ -61,11 +31,13 @@ def main() -> None:
     args = parser.parse_args()
 
     decision_time = parse_timestamp(args.decision_time, field_name="decision_time")
-    batch = load_jsonl_dataset(
-        args.dataset,
-        symbol=args.symbol,
-        timeframe=args.timeframe,
-        fetched_at=decision_time,
+    batch = load_raw_ohlcv_jsonl(
+        OhlcvFixtureSpec(
+            path=args.dataset,
+            symbol=args.symbol,
+            timeframe=args.timeframe,
+        ),
+        fetched_at=args.decision_time,
     )
 
     with tempfile.TemporaryDirectory(prefix="trading-raw-") as directory:

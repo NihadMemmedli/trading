@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from datetime import UTC, datetime
 from types import ModuleType
 
 import pytest
@@ -56,3 +57,41 @@ def test_public_adapter_requires_spot_market(monkeypatch: pytest.MonkeyPatch) ->
     adapter = PublicMarketDataAdapter("binance")
     with pytest.raises(MarketDataError, match="public spot"):
         adapter.fetch_ohlcv(OhlcvRequest(symbol="BTC/USDT", timeframe="1m", limit=5))
+
+
+def test_public_adapter_rejects_unsupported_exchange() -> None:
+    with pytest.raises(MarketDataError, match="unsupported public exchange"):
+        PublicMarketDataAdapter("kraken")
+
+
+def test_public_adapter_applies_until_bound(monkeypatch: pytest.MonkeyPatch) -> None:
+    class BoundedExchange(FakeExchange):
+        def fetch_ohlcv(
+            self,
+            symbol: str,
+            *,
+            timeframe: str,
+            since: int | None,
+            limit: int,
+        ) -> list[list[object]]:
+            return [
+                [1767225600000, "1", "2", "1", "2", "10"],
+                [1767225660000, "2", "3", "2", "3", "10"],
+                [1767225720000, "3", "4", "3", "4", "10"],
+            ]
+
+    fake_ccxt = ModuleType("ccxt")
+    fake_ccxt.binance = BoundedExchange  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "ccxt", fake_ccxt)
+
+    adapter = PublicMarketDataAdapter("binance")
+    batch = adapter.fetch_ohlcv(
+        OhlcvRequest(
+            symbol="BTC/USDT",
+            timeframe="1m",
+            limit=5,
+            until=datetime(2026, 1, 1, 0, 2, tzinfo=UTC),
+        )
+    )
+
+    assert len(batch.rows) == 2

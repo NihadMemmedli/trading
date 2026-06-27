@@ -22,6 +22,8 @@ Exit criteria:
 
 ## Phase 1: Project Skeleton
 
+Status: complete. The project now has its own local git repository with a passing checked-in baseline.
+
 Deliverables:
 
 - `pyproject.toml` configured for Python 3.12, `uv`, `pytest`, `ruff`, and typing
@@ -41,6 +43,8 @@ Exit criteria:
 
 ## Phase 2: Data Foundation
 
+Status: in progress. Public OHLCV ingestion, raw archive writes, normalized candle persistence, point-in-time candle reads, and deterministic offline OHLCV fixtures are implemented for the MVP symbol universe.
+
 Deliverables:
 
 - Market data interfaces for candles, trades, order books, and funding rates
@@ -52,9 +56,10 @@ Deliverables:
 
 Exit criteria:
 
-- Backtests can load deterministic historical data without network access.
-- Data quality failures are explicit and test-covered.
-- UTC timestamp validation, duplicate candle constraints, and point-in-time indexes are tested.
+- Backtests can load deterministic historical candle data without network access.
+- Data quality failures for timestamps, duplicates, gaps, invalid OHLCV ranges, and symbols are explicit and test-covered.
+- UTC timestamp validation, duplicate candle constraints, bounded point-in-time reads, and point-in-time indexes are tested.
+- Remaining before Phase 2 completion: trades, order book snapshots, funding/derivatives interfaces, and broader metadata tables.
 
 ## Phase 3: Research and Backtesting
 

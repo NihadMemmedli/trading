@@ -6,6 +6,8 @@ from typing import Protocol
 
 from trading.data.market import MarketDataError, OhlcvRequest, RawOhlcvBatch
 
+PUBLIC_EXCHANGES = frozenset({"binance"})
+
 
 class PublicOhlcvAdapter(Protocol):
     """Public spot OHLCV-only adapter contract."""
@@ -23,6 +25,8 @@ class PublicMarketDataAdapter:
 
     def __init__(self, exchange_name: str = "binance") -> None:
         self.exchange_name = exchange_name.lower()
+        if self.exchange_name not in PUBLIC_EXCHANGES:
+            raise MarketDataError(f"unsupported public exchange: {self.exchange_name}")
         self._client: object | None = None
 
     def _load_client(self) -> object:
@@ -51,6 +55,9 @@ class PublicMarketDataAdapter:
             since=since_ms,
             limit=request.limit,
         )
+        if request.until is not None:
+            until_ms = int(request.until.timestamp() * 1000)
+            rows = [row for row in rows if int(row[0]) < until_ms]
         return RawOhlcvBatch(
             exchange=request.exchange,
             symbol=request.symbol,

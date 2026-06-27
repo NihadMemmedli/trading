@@ -112,9 +112,40 @@ def test_alembic_timescale_candles_and_point_in_time_queries() -> None:
         timeframe="1m",
         decision_time=datetime(2026, 6, 1, 1, 0, tzinfo=UTC),
     )
+    bounded_replay = service.point_in_time_candles(
+        exchange="binance",
+        symbol="ETH/USDT",
+        timeframe="1m",
+        decision_time=datetime(2026, 6, 1, 1, 0, tzinfo=UTC),
+        start_time=datetime(2026, 6, 1, 0, 1, tzinfo=UTC),
+        end_time=datetime(2026, 6, 1, 0, 2, tzinfo=UTC),
+        source="binance",
+    )
+    missing_pair = service.point_in_time_candles(
+        exchange="binance",
+        symbol="BTC/USDT",
+        timeframe="1m",
+        decision_time=datetime(2026, 6, 1, 1, 0, tzinfo=UTC),
+    )
 
     assert before_available == []
     assert [candle.close for candle in after_available] == [Decimal("105"), Decimal("110")]
+    assert [candle.close for candle in bounded_replay] == [Decimal("110")]
+    assert missing_pair == []
+
+    with engine.begin() as connection:
+        btc_pair_count = connection.execute(
+            sa.text("SELECT count(*) FROM trading_pairs WHERE symbol = 'BTC/USDT'")
+        ).scalar_one()
+        pit_index = connection.execute(
+            sa.text(
+                "SELECT indexname FROM pg_indexes "
+                "WHERE tablename = 'candles' AND indexname = 'ix_candles_pit_replay'"
+            )
+        ).scalar_one()
+
+    assert btc_pair_count == 0
+    assert pit_index == "ix_candles_pit_replay"
 
     command.downgrade(config, "base")
     command.upgrade(config, "head")

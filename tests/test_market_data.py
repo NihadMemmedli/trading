@@ -72,6 +72,40 @@ def test_normalization_rejects_duplicate_and_future_candles() -> None:
         normalize_ohlcv_batch(future_batch, raw_checksum="abc")
 
 
+def test_normalization_rejects_invalid_ohlcv_ranges() -> None:
+    batch = RawOhlcvBatch(
+        exchange="binance",
+        symbol="BTC/USDT",
+        timeframe="1m",
+        rows=[
+            ["2026-01-01T00:00:00Z", "10", "9", "8", "9", "1"],
+        ],
+    )
+
+    with pytest.raises(MarketDataError, match="high"):
+        normalize_ohlcv_batch(
+            batch,
+            raw_checksum="abc",
+            now=datetime(2026, 1, 1, 0, 5, tzinfo=UTC),
+        )
+
+    negative_volume = RawOhlcvBatch(
+        exchange="binance",
+        symbol="BTC/USDT",
+        timeframe="1m",
+        rows=[
+            ["2026-01-01T00:00:00Z", "8", "10", "7", "9", "-1"],
+        ],
+    )
+
+    with pytest.raises(MarketDataError, match="nonnegative"):
+        normalize_ohlcv_batch(
+            negative_volume,
+            raw_checksum="abc",
+            now=datetime(2026, 1, 1, 0, 5, tzinfo=UTC),
+        )
+
+
 def test_gap_detection_and_dataset_hash_are_deterministic() -> None:
     timestamps = [
         datetime(2026, 1, 1, 0, 0, tzinfo=UTC),

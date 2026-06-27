@@ -2,7 +2,7 @@
 
 Greenfield research platform for crypto market data ingestion, strategy research, AI-assisted signal evaluation, backtesting, and paper-trading simulation.
 
-Current state: Phase 1 developer skeleton. The repository has a single runtime package, `trading`, plus FastAPI health/config endpoints, safety-first settings validation, tests, and local Postgres/TimescaleDB and Redis services. It still has no exchange connector, trading engine, model pipeline, or order execution.
+Current state: Phase 1 complete, Phase 2 data foundation in progress. The repository has its own local git history, a single runtime package, `trading`, FastAPI health/config/ingestion endpoints, safety-first settings validation, public OHLCV ingestion, raw Parquet archive support, Timescale-backed candle storage, deterministic offline fixtures, tests, and local Postgres/TimescaleDB and Redis services. It still has no trading engine, model pipeline, order execution, wallet, or custody code.
 
 ## Safety Boundaries
 
@@ -39,7 +39,7 @@ Run the API locally:
 uv run uvicorn trading.apps.api.app:app --reload
 ```
 
-Local infrastructure is optional for Phase 1 endpoints:
+Local infrastructure is optional for API-only checks and required for DB-backed ingestion verification:
 
 ```bash
 make services-up
@@ -70,12 +70,13 @@ Planned modules:
 - `trading.apps.workers`: placeholder worker entrypoint in Phase 1; later background jobs for ingestion, feature generation, agent runs, backtests, and paper sessions
 - `apps/dashboard`: Streamlit MVP dashboard after the core API stabilizes
 - `trading.data`: provider adapters, normalized market data, order books, funding, fundamentals, news, and sentiment inputs
+- `trading.data.offline`: deterministic fixture loading for offline research and future backtests
 - `trading.features`: feature engineering, labeling, point-in-time joins, and feature store access
 - `trading.agents`: strict-JSON analyst agents and trade proposal generation
 - `trading.strategies`: deterministic strategy rules and AI-assisted signal adapters
 - `trading.risk`: position sizing, stale-data checks, drawdown limits, exposure caps, kill switches, and audit rules
 - `trading.backtesting`: portfolio simulation, fees, slippage, latency assumptions, and metrics
-- Execution adapters are not part of Phase 1. Do not add exchange order adapters, broker clients, wallet clients, or custody clients.
+- Execution adapters are not part of the current phase. Do not add exchange order adapters, broker clients, wallet clients, or custody clients.
 - `trading.observability`: structured logs, run metadata, metrics, and reproducible reports
 
 ## Development Rules

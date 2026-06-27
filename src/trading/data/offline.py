@@ -1,0 +1,93 @@
+"""Offline OHLCV dataset loading for deterministic research and backtests."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+from trading.data.market import NormalizedCandle, RawOhlcvBatch, parse_timestamp, require_utc
+from trading.data.quality import deterministic_dataset_hash, normalize_ohlcv_batch
+
+
+@dataclass(frozen=True)
+class OhlcvFixtureSpec:
+    path: Path
+    symbol: str
+    timeframe: str
+    exchange: str = "binance"
+
+
+@dataclass(frozen=True)
+class OfflineOhlcvDataset:
+    name: str
+    decision_time: datetime
+    candles: tuple[NormalizedCandle, ...]
+    dataset_hash: str
+
+    @property
+    def symbols(self) -> tuple[str, ...]:
+        return tuple(sorted({candle.symbol for candle in self.candles}))
+
+
+def load_raw_ohlcv_jsonl(spec: OhlcvFixtureSpec, *, fetched_at: str) -> RawOhlcvBatch:
+    rows: list[list[Any]] = []
+    with spec.path.open("r", encoding="utf-8") as file:
+        for line_number, line in enumerate(file, start=1):
+            item = json.loads(line)
+            try:
+                rows.append(
+                    [
+                        item["timestamp"],
+                        item["open"],
+                        item["high"],
+                        item["low"],
+                        item["close"],
+                        item["volume"],
+                    ]
+                )
+            except KeyError as exc:
+                raise ValueError(f"{spec.path}:{line_number} is missing {exc.args[0]}") from exc
+
+    return RawOhlcvBatch(
+        exchange=spec.exchange,
+        symbol=spec.symbol,
+        timeframe=spec.timeframe,
+        rows=rows,
+        fetched_at=parse_timestamp(fetched_at, field_name="fetched_at"),
+    )
+
+
+def build_offline_ohlcv_dataset(
+    *,
+    name: str,
+    fixtures: list[OhlcvFixtureSpec],
+    decision_time: str,
+) -> OfflineOhlcvDataset:
+    parsed_decision_time = parse_timestamp(decision_time, field_name="decision_time")
+    require_utc(parsed_decision_time, field_name="decision_time")
+
+    candles: list[NormalizedCandle] = []
+    for fixture in fixtures:
+        raw_checksum = hashlib.sha256(fixture.path.read_bytes()).hexdigest()
+        batch = load_raw_ohlcv_jsonl(fixture, fetched_at=decision_time)
+        candles.extend(
+            normalize_ohlcv_batch(
+                batch,
+                raw_checksum=raw_checksum,
+                now=parsed_decision_time,
+            )
+        )
+
+    sorted_candles = tuple(
+        sorted(candles, key=lambda candle: (candle.symbol, candle.timeframe, candle.timestamp))
+    )
+    return OfflineOhlcvDataset(
+        name=name,
+        decision_time=parsed_decision_time,
+        candles=sorted_candles,
+        dataset_hash=deterministic_dataset_hash(list(sorted_candles)),
+    )

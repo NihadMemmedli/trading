@@ -26,6 +26,22 @@ def decimal_from_raw(value: Any, *, field_name: str) -> Decimal:
     return decimal
 
 
+def validate_ohlcv_range(
+    *,
+    open_: Decimal,
+    high: Decimal,
+    low: Decimal,
+    close: Decimal,
+    volume: Decimal,
+) -> None:
+    if min(open_, high, low, close, volume) < Decimal("0"):
+        raise MarketDataError("OHLCV values must be nonnegative")
+    if high < max(open_, close, low):
+        raise MarketDataError("high must be at least open, close, and low")
+    if low > min(open_, close, high):
+        raise MarketDataError("low must be at most open, close, and high")
+
+
 def detect_duplicate_timestamps(timestamps: list[datetime]) -> list[datetime]:
     seen: set[datetime] = set()
     duplicates: list[datetime] = []
@@ -83,17 +99,23 @@ def normalize_ohlcv_batch(
 
     candles: list[NormalizedCandle] = []
     for timestamp, row in parsed_rows:
+        open_ = decimal_from_raw(row[1], field_name="open")
+        high = decimal_from_raw(row[2], field_name="high")
+        low = decimal_from_raw(row[3], field_name="low")
+        close = decimal_from_raw(row[4], field_name="close")
+        volume = decimal_from_raw(row[5], field_name="volume")
+        validate_ohlcv_range(open_=open_, high=high, low=low, close=close, volume=volume)
         candles.append(
             NormalizedCandle(
                 exchange=batch.exchange,
                 symbol=batch.symbol,
                 timeframe=batch.timeframe,
                 timestamp=timestamp,
-                open=decimal_from_raw(row[1], field_name="open"),
-                high=decimal_from_raw(row[2], field_name="high"),
-                low=decimal_from_raw(row[3], field_name="low"),
-                close=decimal_from_raw(row[4], field_name="close"),
-                volume=decimal_from_raw(row[5], field_name="volume"),
+                open=open_,
+                high=high,
+                low=low,
+                close=close,
+                volume=volume,
                 available_at=available_at,
                 raw_checksum=raw_checksum,
                 quality_flags=quality_flags.copy(),

@@ -12,7 +12,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from trading.data.archive import RawArchiveResult
-from trading.data.market import IngestionStatus, NormalizedCandle, OhlcvRequest, utc_now
+from trading.data.market import (
+    IngestionStatus,
+    NormalizedCandle,
+    OhlcvRequest,
+    require_utc,
+    utc_now,
+)
 from trading.db.models import (
     Asset,
     Candle,
@@ -196,18 +202,41 @@ class IngestionService:
         symbol: str,
         timeframe: str,
         decision_time: datetime,
+        start_time: datetime | None = None,
+        end_time: datetime | None = None,
+        source: str | None = None,
     ) -> list[Candle]:
+        parsed_decision_time = require_utc(decision_time, field_name="decision_time")
+        parsed_start_time = (
+            require_utc(start_time, field_name="start_time") if start_time is not None else None
+        )
+        parsed_end_time = (
+            require_utc(end_time, field_name="end_time") if end_time is not None else None
+        )
+        if (
+            parsed_start_time is not None
+            and parsed_end_time is not None
+            and parsed_start_time >= parsed_end_time
+        ):
+            raise ValueError("start_time must be earlier than end_time")
+
         with session_scope(self._session_factory) as session:
-            pair = self._get_or_create_pair(session, exchange, symbol)
-            query: Select[tuple[Candle]] = (
-                select(Candle)
-                .where(
-                    Candle.pair_id == pair.id,
-                    Candle.timeframe == timeframe,
-                    Candle.available_at <= decision_time,
-                )
-                .order_by(Candle.timestamp)
-            )
+            pair = self._find_pair(session, exchange, symbol)
+            if pair is None:
+                return []
+            filters = [
+                Candle.pair_id == pair.id,
+                Candle.timeframe == timeframe,
+                Candle.available_at <= parsed_decision_time,
+            ]
+            if parsed_start_time is not None:
+                filters.append(Candle.timestamp >= parsed_start_time)
+            if parsed_end_time is not None:
+                filters.append(Candle.timestamp < parsed_end_time)
+            if source is not None:
+                filters.append(Candle.source == source)
+
+            query: Select[tuple[Candle]] = select(Candle).where(*filters).order_by(Candle.timestamp)
             candles = list(session.execute(query).scalars().all())
             for candle in candles:
                 session.expunge(candle)
@@ -266,6 +295,17 @@ class IngestionService:
         session.add(pair)
         session.flush()
         return pair
+
+    def _find_pair(self, session: Session, exchange_name: str, symbol: str) -> TradingPair | None:
+        return session.execute(
+            select(TradingPair)
+            .join(Exchange, TradingPair.exchange_id == Exchange.id)
+            .where(
+                Exchange.name == exchange_name,
+                TradingPair.symbol == symbol,
+                TradingPair.market_type == "spot",
+            )
+        ).scalar_one_or_none()
 
     def _get_or_create_exchange(self, session: Session, name: str) -> Exchange:
         exchange = session.execute(
