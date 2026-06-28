@@ -73,6 +73,114 @@ class TradingPair(Base):
     exchange: Mapped[Exchange] = relationship(back_populates="pairs")
     base_asset: Mapped[Asset] = relationship(foreign_keys=[base_asset_id])
     quote_asset: Mapped[Asset] = relationship(foreign_keys=[quote_asset_id])
+    agent_reports: Mapped[list[AgentReport]] = relationship(back_populates="pair")
+    trade_proposals: Mapped[list[TradeProposal]] = relationship(back_populates="pair")
+
+
+class AgentReport(Base):
+    __tablename__ = "agent_reports"
+    __table_args__ = (
+        CheckConstraint(
+            "confidence >= 0 AND confidence <= 1",
+            name="agent_report_confidence_valid",
+        ),
+        Index("ix_agent_reports_pair_timestamp", "pair_id", "timestamp"),
+        Index("ix_agent_reports_agent_name", "agent_name"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    pair_id: Mapped[int] = mapped_column(ForeignKey("trading_pairs.id"), nullable=False)
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    agent_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    report_type: Mapped[str] = mapped_column(String(64), nullable=False, default="analyst_report")
+    output_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    confidence: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    pair: Mapped[TradingPair] = relationship(back_populates="agent_reports")
+
+
+class TradeProposal(Base):
+    __tablename__ = "trade_proposals"
+    __table_args__ = (
+        CheckConstraint("side IN ('long', 'flat')", name="trade_proposal_side_valid"),
+        CheckConstraint(
+            "status IN ('pending_risk', 'flat', 'approved', 'rejected', 'reduced')",
+            name="trade_proposal_status_valid",
+        ),
+        CheckConstraint(
+            "confidence >= 0 AND confidence <= 1",
+            name="trade_proposal_confidence_valid",
+        ),
+        CheckConstraint("entry_price IS NULL OR entry_price > 0", name="entry_price_positive"),
+        CheckConstraint("stop_loss IS NULL OR stop_loss > 0", name="stop_loss_positive"),
+        Index("ix_trade_proposals_pair_timestamp_status", "pair_id", "timestamp", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    pair_id: Mapped[int] = mapped_column(ForeignKey("trading_pairs.id"), nullable=False)
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    source: Mapped[str] = mapped_column(String(64), nullable=False)
+    side: Mapped[str] = mapped_column(String(16), nullable=False)
+    entry_type: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    entry_price: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    stop_loss: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    take_profit_json: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False)
+    confidence: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    thesis: Mapped[str] = mapped_column(Text, nullable=False)
+    invalidation: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    pair: Mapped[TradingPair] = relationship(back_populates="trade_proposals")
+    risk_decision: Mapped[RiskDecision | None] = relationship(
+        back_populates="proposal",
+        cascade="all, delete-orphan",
+    )
+
+
+class RiskDecision(Base):
+    __tablename__ = "risk_decisions"
+    __table_args__ = (
+        CheckConstraint("decision IN ('approve', 'reject', 'reduce')", name="risk_decision_valid"),
+        CheckConstraint(
+            "max_position_size IS NULL OR max_position_size >= 0",
+            name="max_position_size_nonnegative",
+        ),
+        CheckConstraint(
+            "max_loss_usd IS NULL OR max_loss_usd >= 0",
+            name="max_loss_usd_nonnegative",
+        ),
+        Index("ix_risk_decisions_created_at", "created_at"),
+        Index("ix_risk_decisions_decision_created_at", "decision", "created_at"),
+    )
+
+    proposal_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("trade_proposals.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    decision: Mapped[str] = mapped_column(String(16), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    max_position_size: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    max_loss_usd: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    violated_rules_json: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    warnings_json: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    raw_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    inserted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    proposal: Mapped[TradeProposal] = relationship(back_populates="risk_decision")
 
 
 class IngestionRun(Base):

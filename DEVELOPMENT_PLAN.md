@@ -81,19 +81,21 @@ Exit criteria:
 
 ## Phase 4: AI Signal Pipeline
 
+Status: first contract slice complete. Strict analyst report, trade proposal, and risk decision schemas are implemented with JSONB-backed persistence, API routes, Alembic migration `20260627_0011_ai_signal_contracts.py`, and tests. Model adapters, orchestration, feature pipeline work, paper-trading integration, and execution paths remain deferred.
+
 Deliverables:
 
 - Feature pipeline with strict train/test separation
 - Model evaluation workflow with walk-forward validation
 - Prompt/model adapters only where they add measurable value
 - Guardrails against look-ahead bias, leakage, and overfitting
-- Strict JSON schemas for analyst outputs, trade proposals, and risk decisions
+- Strict JSON schemas for analyst outputs, trade proposals, and risk decisions: complete for the initial persistence/API contract slice
 
 Exit criteria:
 
 - AI signals are evaluated against deterministic baselines.
 - Promotion requires documented evidence, not anecdotal performance.
-- Malformed agent output cannot create proposals or execution events.
+- Malformed agent output cannot create persisted reports, proposals, risk decisions, or execution events.
 
 ## Phase 5: Paper Trading
 

@@ -47,7 +47,7 @@ def test_api_and_agent_modules_expose_no_executor_or_client_symbols() -> None:
     modules_to_check = [
         module_info.name
         for module_info in pkgutil.walk_packages(trading.__path__, prefix="trading.")
-        if module_info.name.startswith(("trading.apps.api", "trading.agents"))
+        if module_info.name.startswith(("trading.apps.api", "trading.agents", "trading.risk"))
     ]
 
     for module_name in modules_to_check:
@@ -108,7 +108,9 @@ def test_provider_registry_metadata_exposes_no_execution_or_private_credentials(
 def test_backtesting_and_strategy_modules_import_no_execution_or_private_runtime() -> None:
     source_roots = (
         Path("src/trading/apps/api"),
+        Path("src/trading/agents"),
         Path("src/trading/backtesting"),
+        Path("src/trading/risk"),
         Path("src/trading/services"),
         Path("src/trading/strategies"),
     )
