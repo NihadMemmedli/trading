@@ -15,6 +15,7 @@ from trading.apps.api.routers import (
     feature_sets,
     health,
     ingestion,
+    model_experiments,
     risk,
     trade_proposals,
     version,
@@ -46,6 +47,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(ingestion.router)
     app.include_router(datasets.router)
     app.include_router(feature_sets.router)
+    app.include_router(model_experiments.router)
     app.include_router(backtests.router)
     app.include_router(agents.router)
     app.include_router(trade_proposals.router)

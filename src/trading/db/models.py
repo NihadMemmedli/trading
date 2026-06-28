@@ -401,6 +401,8 @@ class Dataset(Base):
 
     backtest_runs: Mapped[list[BacktestRun]] = relationship(back_populates="dataset")
     feature_sets: Mapped[list[FeatureSet]] = relationship(back_populates="dataset")
+    split_definitions: Mapped[list[SplitDefinition]] = relationship(back_populates="dataset")
+    model_experiments: Mapped[list[ModelExperiment]] = relationship(back_populates="dataset")
 
 
 class FeatureSet(Base):
@@ -437,6 +439,139 @@ class FeatureSet(Base):
         cascade="all, delete-orphan",
         order_by="FeatureRow.timestamp, FeatureRow.id",
     )
+    split_definitions: Mapped[list[SplitDefinition]] = relationship(back_populates="feature_set")
+    model_experiments: Mapped[list[ModelExperiment]] = relationship(back_populates="feature_set")
+
+
+class SplitDefinition(Base):
+    __tablename__ = "split_definitions"
+    __table_args__ = (
+        CheckConstraint(
+            "split_type IN ('holdout', 'walk_forward')",
+            name="split_definition_type_valid",
+        ),
+        UniqueConstraint("dataset_id", "feature_set_id", "name", "split_hash"),
+        Index("ix_split_definitions_dataset_feature_set", "dataset_id", "feature_set_id"),
+        Index("ix_split_definitions_hash", "split_hash"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    dataset_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("datasets.id"),
+        nullable=False,
+    )
+    feature_set_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("feature_sets.id"),
+        nullable=False,
+    )
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    split_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    split_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    config_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    dataset: Mapped[Dataset] = relationship(back_populates="split_definitions")
+    feature_set: Mapped[FeatureSet] = relationship(back_populates="split_definitions")
+    windows: Mapped[list[SplitWindow]] = relationship(
+        back_populates="split_definition",
+        cascade="all, delete-orphan",
+        order_by="SplitWindow.window_index, SplitWindow.split_name, SplitWindow.id",
+    )
+    model_experiments: Mapped[list[ModelExperiment]] = relationship(
+        back_populates="split_definition"
+    )
+
+
+class SplitWindow(Base):
+    __tablename__ = "split_windows"
+    __table_args__ = (
+        CheckConstraint(
+            "split_name IN ('train', 'validation', 'test')",
+            name="split_window_name_valid",
+        ),
+        CheckConstraint("window_index >= 0", name="split_window_index_nonnegative"),
+        CheckConstraint("start_at < end_at", name="split_window_range_valid"),
+        CheckConstraint("end_at <= decision_time", name="split_window_decision_time_valid"),
+        UniqueConstraint("split_definition_id", "window_index", "split_name"),
+        Index(
+            "ix_split_windows_definition_index_name",
+            "split_definition_id",
+            "window_index",
+            "split_name",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    split_definition_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("split_definitions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    window_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    split_name: Mapped[str] = mapped_column(String(32), nullable=False)
+    start_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    end_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    decision_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    split_definition: Mapped[SplitDefinition] = relationship(back_populates="windows")
+
+
+class ModelExperiment(Base):
+    __tablename__ = "model_experiments"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('created', 'running', 'succeeded', 'failed')",
+            name="model_experiment_status_valid",
+        ),
+        Index("ix_model_experiments_dataset_feature_set", "dataset_id", "feature_set_id"),
+        Index("ix_model_experiments_split_definition_id", "split_definition_id"),
+        Index("ix_model_experiments_status_created_at", "status", "created_at"),
+        Index("ix_model_experiments_hash", "experiment_hash"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    dataset_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("datasets.id"),
+        nullable=False,
+    )
+    feature_set_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("feature_sets.id"),
+        nullable=False,
+    )
+    split_definition_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("split_definitions.id"),
+        nullable=False,
+    )
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    model_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    parameter_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    experiment_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    code_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    parameters_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    metrics_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    dataset: Mapped[Dataset] = relationship(back_populates="model_experiments")
+    feature_set: Mapped[FeatureSet] = relationship(back_populates="model_experiments")
+    split_definition: Mapped[SplitDefinition] = relationship(back_populates="model_experiments")
 
 
 class FeatureRow(Base):
