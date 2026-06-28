@@ -9,6 +9,7 @@ import pytest
 
 from trading.backtesting import (
     BacktestConfig,
+    BacktestSizingConfig,
     build_backtest_report,
     export_backtest_report_json,
     run_candle_backtest,
@@ -52,6 +53,8 @@ def make_config(
     fee_bps: str = "0",
     slippage_bps: str = "0",
     decision_time: datetime = BASE_TIME + timedelta(minutes=10),
+    strategy_version: str = "test-v1",
+    sizing: BacktestSizingConfig | None = None,
 ) -> BacktestConfig:
     return BacktestConfig(
         symbol="BTC/USDT",
@@ -63,7 +66,9 @@ def make_config(
         end=BASE_TIME + timedelta(minutes=10),
         decision_time=decision_time,
         strategy_name=strategy_name,
+        strategy_version=strategy_version,
         strategy_parameters=strategy_parameters,
+        sizing=sizing or BacktestSizingConfig(),
     )
 
 
@@ -193,6 +198,62 @@ def test_backtest_calculates_turnover_exposure_benchmark_and_excess_return() -> 
     assert result.metrics.average_exposure == Decimal("1") / Decimal("3")
     assert result.metrics.benchmark_total_return == Decimal("1")
     assert result.metrics.excess_return == Decimal("0")
+    assert result.metrics.return_observations == 2
+    assert result.metrics.positive_return_periods == 1
+    assert result.metrics.negative_return_periods == 0
+    assert result.metrics.return_mean == Decimal("0.5")
+    assert result.metrics.return_stddev == Decimal("0.5")
+    assert result.metrics.sharpe_like == Decimal(str(2**0.5))
+
+
+def test_backtest_sizing_config_caps_exposure_and_reserves_cash() -> None:
+    strategy = AlwaysLongStrategy()
+    candles = (
+        make_candle(0, open_="100", close="100"),
+        make_candle(1, open_="100", close="100"),
+    )
+
+    result = run_candle_backtest(
+        candles=candles,
+        dataset_hash="dataset-a",
+        config=make_config(
+            strategy_name=strategy.name,
+            strategy_parameters=strategy.parameters,
+            sizing=BacktestSizingConfig(
+                max_exposure=Decimal("0.5"),
+                cash_reserve=Decimal("0.25"),
+                min_trade_notional=Decimal("0"),
+            ),
+        ),
+        strategy=strategy,
+    )
+
+    assert result.trades_count == 1
+    assert result.trades[0].quantity == Decimal("5")
+    assert result.final_equity == Decimal("1000")
+    assert result.metrics.average_exposure == Decimal("0.25")
+
+
+def test_backtest_sizing_config_skips_small_trades() -> None:
+    strategy = AlwaysLongStrategy()
+    candles = (
+        make_candle(0, open_="100", close="100"),
+        make_candle(1, open_="100", close="100"),
+    )
+
+    result = run_candle_backtest(
+        candles=candles,
+        dataset_hash="dataset-a",
+        config=make_config(
+            strategy_name=strategy.name,
+            strategy_parameters=strategy.parameters,
+            sizing=BacktestSizingConfig(min_trade_notional=Decimal("1000.01")),
+        ),
+        strategy=strategy,
+    )
+
+    assert result.trades_count == 0
+    assert result.final_equity == Decimal("1000")
 
 
 def test_same_dataset_and_config_produce_same_result_hash() -> None:
@@ -223,6 +284,51 @@ def test_same_dataset_and_config_produce_same_result_hash() -> None:
     assert first.config_hash == second.config_hash
     assert first.result_hash == second.result_hash
     assert len(first.result_hash) == 64
+
+
+def test_strategy_version_and_sizing_are_part_of_config_and_result_hashes() -> None:
+    strategy = AlwaysLongStrategy()
+    candles = (
+        make_candle(0, open_="100", close="100"),
+        make_candle(1, open_="100", close="100"),
+    )
+
+    first = run_candle_backtest(
+        candles=candles,
+        dataset_hash="dataset-a",
+        config=make_config(
+            strategy_name=strategy.name,
+            strategy_parameters=strategy.parameters,
+            strategy_version="version-a",
+        ),
+        strategy=strategy,
+    )
+    second = run_candle_backtest(
+        candles=candles,
+        dataset_hash="dataset-a",
+        config=make_config(
+            strategy_name=strategy.name,
+            strategy_parameters=strategy.parameters,
+            strategy_version="version-b",
+        ),
+        strategy=strategy,
+    )
+    third = run_candle_backtest(
+        candles=candles,
+        dataset_hash="dataset-a",
+        config=make_config(
+            strategy_name=strategy.name,
+            strategy_parameters=strategy.parameters,
+            strategy_version="version-a",
+            sizing=BacktestSizingConfig(max_exposure=Decimal("0.5")),
+        ),
+        strategy=strategy,
+    )
+
+    assert first.config_hash != second.config_hash
+    assert first.config_hash != third.config_hash
+    assert first.result_hash != second.result_hash
+    assert first.result_hash != third.result_hash
 
 
 def test_backtest_report_export_is_reproducible_with_explicit_generated_at() -> None:
@@ -261,6 +367,12 @@ def test_backtest_report_export_is_reproducible_with_explicit_generated_at() -> 
     assert first_report.report_hash == second_report.report_hash
     assert first_json == second_json
     assert decoded["report_hash"] == first_report.report_hash
+    assert decoded["strategy_version"] == "test-v1"
+    assert decoded["sizing"] == {
+        "cash_reserve": "0",
+        "max_exposure": "1",
+        "min_trade_notional": "0",
+    }
     assert decoded["metrics"]["final_equity"] == str(first_result.final_equity)
     assert decoded["generated_at"] == generated_at.isoformat()
 

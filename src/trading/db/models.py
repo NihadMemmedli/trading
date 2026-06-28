@@ -161,6 +161,11 @@ class BacktestRun(Base):
         cascade="all, delete-orphan",
         order_by="BacktestEquityPoint.timestamp",
     )
+    events: Mapped[list[BacktestRunEvent]] = relationship(
+        back_populates="run",
+        cascade="all, delete-orphan",
+        order_by="BacktestRunEvent.timestamp, BacktestRunEvent.id",
+    )
 
 
 class BacktestTrade(Base):
@@ -219,6 +224,34 @@ class BacktestEquityPoint(Base):
     )
 
     run: Mapped[BacktestRun] = relationship(back_populates="equity_points")
+
+
+class BacktestRunEvent(Base):
+    __tablename__ = "backtest_run_events"
+    __table_args__ = (
+        CheckConstraint(
+            "level IN ('debug', 'info', 'warning', 'error')", name="backtest_event_level_valid"
+        ),
+        Index("ix_backtest_run_events_run_id_timestamp", "run_id", "timestamp"),
+        Index("ix_backtest_run_events_event_type_created_at", "event_type", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("backtest_runs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    level: Mapped[str] = mapped_column(String(16), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(128), nullable=False)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    run: Mapped[BacktestRun] = relationship(back_populates="events")
 
 
 class RawArtifact(Base):

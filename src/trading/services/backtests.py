@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session, selectinload, sessionmaker
 from trading.backtesting import (
     BacktestConfig,
     BacktestRunStatus,
+    BacktestSizingConfig,
     build_backtest_report,
     export_backtest_report_json,
     run_candle_backtest,
@@ -41,6 +42,7 @@ from trading.data.market import (
 from trading.db.models import (
     BacktestEquityPoint,
     BacktestRun,
+    BacktestRunEvent,
     BacktestTrade,
     Candle,
     Dataset,
@@ -48,7 +50,12 @@ from trading.db.models import (
     TradingPair,
 )
 from trading.db.session import session_scope
-from trading.strategies import CandleStrategy, MovingAverageCrossoverStrategy, StrategyParameters
+from trading.strategies import (
+    CandleStrategy,
+    StrategyParameters,
+    build_strategy,
+    get_strategy_metadata,
+)
 
 ERROR_MESSAGE_MAX_LENGTH = 2000
 
@@ -57,20 +64,30 @@ class BacktestRunNotFoundError(LookupError):
     """Raised when a persisted backtest run cannot be found."""
 
 
+class BacktestDatasetNotFoundError(LookupError):
+    """Raised when a dataset-backed backtest request references an unknown dataset."""
+
+
+class BacktestDatasetNotExecutableError(ValueError):
+    """Raised when a registered dataset cannot be replayed by the backtest engine."""
+
+
 @dataclass(frozen=True)
 class BacktestRunRequest:
-    exchange: str
-    symbol: str
-    timeframe: str
-    start: datetime
-    end: datetime
-    decision_time: datetime
     generated_at: datetime
     initial_capital: Decimal
     fee_bps: Decimal
     slippage_bps: Decimal
     strategy_name: str
     strategy_parameters: Mapping[str, Any]
+    sizing: BacktestSizingConfig = BacktestSizingConfig()
+    exchange: str | None = None
+    symbol: str | None = None
+    timeframe: str | None = None
+    start: datetime | None = None
+    end: datetime | None = None
+    decision_time: datetime | None = None
+    dataset_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -81,12 +98,25 @@ class NormalizedBacktestRunRequest:
     start: datetime
     end: datetime
     decision_time: datetime
+    dataset_id: int | None
+    registered_dataset_hash: str | None
     generated_at: datetime
     initial_capital: Decimal
     fee_bps: Decimal
     slippage_bps: Decimal
     strategy_name: str
+    strategy_version: str
     strategy_parameters: StrategyParameters
+    sizing: BacktestSizingConfig
+
+
+@dataclass(frozen=True)
+class PersistedBacktestRunEvent:
+    timestamp: datetime
+    level: str
+    event_type: str
+    message: str
+    metadata: Mapping[str, Any]
 
 
 class BacktestService:
@@ -97,7 +127,7 @@ class BacktestService:
         self._reports_dir = Path(reports_dir)
 
     def run_backtest(self, request: BacktestRunRequest) -> BacktestRun:
-        normalized = _normalize_request(request)
+        normalized = self._normalize_request(request)
         started_at = utc_now()
 
         try:
@@ -107,6 +137,11 @@ class BacktestService:
             )
             candles = self._load_candles(normalized)
             dataset_hash = deterministic_candle_dataset_hash(candles)
+            if (
+                normalized.registered_dataset_hash is not None
+                and dataset_hash != normalized.registered_dataset_hash
+            ):
+                raise MarketDataError("registered dataset hash does not match replayed candles")
             config = BacktestConfig(
                 symbol=normalized.symbol,
                 timeframe=normalized.timeframe,
@@ -117,7 +152,9 @@ class BacktestService:
                 end=normalized.end,
                 decision_time=normalized.decision_time,
                 strategy_name=normalized.strategy_name,
+                strategy_version=normalized.strategy_version,
                 strategy_parameters=normalized.strategy_parameters,
+                sizing=normalized.sizing,
             )
             result = run_candle_backtest(
                 candles=candles,
@@ -158,6 +195,7 @@ class BacktestService:
                 .options(
                     selectinload(BacktestRun.trades),
                     selectinload(BacktestRun.equity_points),
+                    selectinload(BacktestRun.events),
                 )
                 .where(BacktestRun.id == run_id)
             ).scalar_one_or_none()
@@ -178,6 +216,60 @@ class BacktestService:
             for run in runs:
                 session.expunge(run)
             return runs
+
+    def _normalize_request(self, request: BacktestRunRequest) -> NormalizedBacktestRunRequest:
+        if request.dataset_id is None:
+            return _normalize_request(request)
+        if any(
+            value is not None
+            for value in (
+                request.exchange,
+                request.symbol,
+                request.timeframe,
+                request.start,
+                request.end,
+                request.decision_time,
+            )
+        ):
+            raise BacktestDatasetNotExecutableError(
+                "provide either dataset_id or selector fields, not both"
+            )
+
+        dataset = self._get_dataset(request.dataset_id)
+        selector = _parse_backtest_dataset_name(dataset.name)
+        if dataset.decision_time != selector.decision_time:
+            raise BacktestDatasetNotExecutableError(
+                "dataset decision_time does not match backtest selector"
+            )
+
+        return _normalize_selector_request(
+            exchange=selector.exchange,
+            symbol=selector.symbol,
+            timeframe=selector.timeframe,
+            start=selector.start,
+            end=selector.end,
+            decision_time=selector.decision_time,
+            generated_at=request.generated_at,
+            initial_capital=request.initial_capital,
+            fee_bps=request.fee_bps,
+            slippage_bps=request.slippage_bps,
+            strategy_name=request.strategy_name,
+            strategy_parameters=request.strategy_parameters,
+            sizing=request.sizing,
+            dataset_id=dataset.id,
+            registered_dataset_hash=dataset.dataset_hash,
+        )
+
+    def _get_dataset(self, dataset_id: int) -> Dataset:
+        if isinstance(dataset_id, bool) or dataset_id < 1:
+            raise BacktestDatasetNotFoundError(str(dataset_id))
+
+        with session_scope(self._session_factory) as session:
+            dataset = session.get(Dataset, dataset_id)
+            if dataset is None:
+                raise BacktestDatasetNotFoundError(str(dataset_id))
+            session.expunge(dataset)
+            return dataset
 
     def _load_candles(
         self,
@@ -274,7 +366,9 @@ class BacktestService:
             status=BacktestRunStatus.FAILED,
             started_at=started_at,
             completed_at=completed_at,
-            dataset_hash=None,
+            dataset_hash=(
+                request.registered_dataset_hash if request.dataset_id is not None else None
+            ),
             config_hash=None,
             result_hash=None,
             report_hash=None,
@@ -306,7 +400,9 @@ class BacktestService:
     ) -> BacktestRun:
         with session_scope(self._session_factory) as session:
             dataset_id = None
-            if dataset_hash is not None:
+            if request.dataset_id is not None:
+                dataset_id = request.dataset_id
+            elif dataset_hash is not None:
                 dataset_id = _get_or_create_backtest_dataset(
                     session,
                     request=request,
@@ -362,12 +458,37 @@ class BacktestService:
                 )
                 for point in equity_curve
             )
+            session.add_all(
+                BacktestRunEvent(
+                    run_id=run.id,
+                    timestamp=event.timestamp,
+                    level=event.level,
+                    event_type=event.event_type,
+                    message=event.message,
+                    metadata_json=dict(event.metadata),
+                )
+                for event in _build_run_events(
+                    request=request,
+                    dataset_id=dataset_id,
+                    status=status,
+                    started_at=started_at,
+                    completed_at=completed_at,
+                    dataset_hash=dataset_hash,
+                    config_hash=config_hash,
+                    result_hash=result_hash,
+                    report_hash=report_hash,
+                    trades_count=len(trades),
+                    equity_points_count=len(equity_curve),
+                    error_message=error_message,
+                )
+            )
             session.flush()
             loaded_run = session.execute(
                 select(BacktestRun)
                 .options(
                     selectinload(BacktestRun.trades),
                     selectinload(BacktestRun.equity_points),
+                    selectinload(BacktestRun.events),
                 )
                 .where(BacktestRun.id == run.id)
             ).scalar_one()
@@ -408,23 +529,122 @@ def deterministic_backtest_dataset_name(request: NormalizedBacktestRunRequest) -
     )
 
 
+@dataclass(frozen=True)
+class BacktestDatasetSelector:
+    exchange: str
+    symbol: str
+    timeframe: str
+    start: datetime
+    end: datetime
+    decision_time: datetime
+
+
+def _parse_backtest_dataset_name(name: str) -> BacktestDatasetSelector:
+    prefix_parts = name.split(":", 4)
+    if len(prefix_parts) != 5 or prefix_parts[0] != "backtest":
+        raise BacktestDatasetNotExecutableError("only backtest-created datasets are executable")
+
+    _, exchange, symbol, timeframe, timestamp_tail = prefix_parts
+    timestamp_parts = timestamp_tail.split("Z:")
+    if len(timestamp_parts) != 3 or not timestamp_parts[2].endswith("Z"):
+        raise BacktestDatasetNotExecutableError("backtest dataset name is malformed")
+
+    start_text = f"{timestamp_parts[0]}Z"
+    end_text = f"{timestamp_parts[1]}Z"
+    decision_time_text = timestamp_parts[2]
+
+    try:
+        start = _parse_utc_iso(start_text, "dataset start")
+        end = _parse_utc_iso(end_text, "dataset end")
+        decision_time = _parse_utc_iso(decision_time_text, "dataset decision_time")
+    except ValueError as exc:
+        raise BacktestDatasetNotExecutableError("backtest dataset name is malformed") from exc
+
+    return BacktestDatasetSelector(
+        exchange=exchange,
+        symbol=symbol,
+        timeframe=timeframe,
+        start=start,
+        end=end,
+        decision_time=decision_time,
+    )
+
+
+def _build_run_events(
+    *,
+    request: NormalizedBacktestRunRequest,
+    dataset_id: int | None,
+    status: BacktestRunStatus,
+    started_at: datetime,
+    completed_at: datetime,
+    dataset_hash: str | None,
+    config_hash: str | None,
+    result_hash: str | None,
+    report_hash: str | None,
+    trades_count: int,
+    equity_points_count: int,
+    error_message: str | None,
+) -> tuple[PersistedBacktestRunEvent, ...]:
+    common_metadata = {
+        "exchange": request.exchange,
+        "symbol": request.symbol,
+        "timeframe": request.timeframe,
+        "dataset_id": dataset_id,
+        "strategy_name": request.strategy_name,
+        "strategy_version": request.strategy_version,
+        "sizing": {
+            "max_exposure": str(request.sizing.max_exposure),
+            "cash_reserve": str(request.sizing.cash_reserve),
+            "min_trade_notional": str(request.sizing.min_trade_notional),
+        },
+    }
+    events = [
+        PersistedBacktestRunEvent(
+            timestamp=started_at,
+            level="info",
+            event_type="backtest.started",
+            message="backtest run started",
+            metadata=common_metadata,
+        )
+    ]
+
+    terminal_metadata = {
+        **common_metadata,
+        "dataset_hash": dataset_hash,
+        "config_hash": config_hash,
+        "result_hash": result_hash,
+        "report_hash": report_hash,
+        "trades_count": trades_count,
+        "equity_points_count": equity_points_count,
+    }
+    if status is BacktestRunStatus.SUCCEEDED:
+        events.append(
+            PersistedBacktestRunEvent(
+                timestamp=completed_at,
+                level="info",
+                event_type="backtest.succeeded",
+                message="backtest run succeeded",
+                metadata=terminal_metadata,
+            )
+        )
+    else:
+        events.append(
+            PersistedBacktestRunEvent(
+                timestamp=completed_at,
+                level="error",
+                event_type="backtest.failed",
+                message="backtest run failed",
+                metadata={**terminal_metadata, "error_message": error_message},
+            )
+        )
+    return tuple(events)
+
+
 def build_backtest_strategy(
     strategy_name: str,
     strategy_parameters: Mapping[str, Any],
 ) -> CandleStrategy:
-    normalized_name = strategy_name.strip()
-    if normalized_name != "moving_average_crossover":
-        raise MarketDataError("unsupported strategy_name")
-
-    expected_keys = {"short_window", "long_window"}
-    provided_keys = set(strategy_parameters)
-    if provided_keys != expected_keys:
-        raise MarketDataError("strategy_parameters must include short_window and long_window only")
-
-    return MovingAverageCrossoverStrategy(
-        short_window=_strict_positive_int(strategy_parameters["short_window"], "short_window"),
-        long_window=_strict_positive_int(strategy_parameters["long_window"], "long_window"),
-    )
+    return build_strategy(strategy_name, strategy_parameters)
 
 
 def deterministic_candle_dataset_hash(candles: tuple[NormalizedCandle, ...]) -> str:
@@ -450,37 +670,81 @@ def deterministic_candle_dataset_hash(candles: tuple[NormalizedCandle, ...]) -> 
 
 
 def _normalize_request(request: BacktestRunRequest) -> NormalizedBacktestRunRequest:
-    exchange = request.exchange.strip().lower()
-    if exchange != "binance":
-        raise MarketDataError("only binance public spot candles are supported for backtests")
+    if request.dataset_id is not None:
+        raise BacktestDatasetNotExecutableError(
+            "dataset_id requests must be normalized by BacktestService"
+        )
 
-    start = require_utc(request.start, field_name="start")
-    end = require_utc(request.end, field_name="end")
-    if start >= end:
-        raise MarketDataError("start must be earlier than end")
-
-    return NormalizedBacktestRunRequest(
-        exchange=exchange,
-        symbol=validate_symbol(request.symbol),
-        timeframe=validate_timeframe(request.timeframe),
-        start=start,
-        end=end,
-        decision_time=require_utc(request.decision_time, field_name="decision_time"),
-        generated_at=require_exact_utc(request.generated_at, field_name="generated_at"),
-        initial_capital=Decimal(request.initial_capital),
-        fee_bps=Decimal(request.fee_bps),
-        slippage_bps=Decimal(request.slippage_bps),
-        strategy_name=request.strategy_name.strip(),
-        strategy_parameters=dict(request.strategy_parameters),
+    return _normalize_selector_request(
+        exchange=request.exchange,
+        symbol=request.symbol,
+        timeframe=request.timeframe,
+        start=request.start,
+        end=request.end,
+        decision_time=request.decision_time,
+        generated_at=request.generated_at,
+        initial_capital=request.initial_capital,
+        fee_bps=request.fee_bps,
+        slippage_bps=request.slippage_bps,
+        strategy_name=request.strategy_name,
+        strategy_parameters=request.strategy_parameters,
+        sizing=request.sizing,
+        dataset_id=None,
+        registered_dataset_hash=None,
     )
 
 
-def _strict_positive_int(value: Any, field_name: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise MarketDataError(f"{field_name} must be an integer")
-    if value <= 0:
-        raise MarketDataError(f"{field_name} must be positive")
-    return int(value)
+def _normalize_selector_request(
+    *,
+    exchange: str | None,
+    symbol: str | None,
+    timeframe: str | None,
+    start: datetime | None,
+    end: datetime | None,
+    decision_time: datetime | None,
+    generated_at: datetime,
+    initial_capital: Decimal,
+    fee_bps: Decimal,
+    slippage_bps: Decimal,
+    strategy_name: str,
+    strategy_parameters: Mapping[str, Any],
+    sizing: BacktestSizingConfig,
+    dataset_id: int | None,
+    registered_dataset_hash: str | None,
+) -> NormalizedBacktestRunRequest:
+    if exchange is None or symbol is None or timeframe is None:
+        raise MarketDataError("backtest selector requires exchange, symbol, and timeframe")
+    if start is None or end is None or decision_time is None:
+        raise MarketDataError("backtest selector requires start, end, and decision_time")
+
+    exchange = exchange.strip().lower()
+    if exchange != "binance":
+        raise MarketDataError("only binance public spot candles are supported for backtests")
+
+    start = require_utc(start, field_name="start")
+    end = require_utc(end, field_name="end")
+    if start >= end:
+        raise MarketDataError("start must be earlier than end")
+    metadata = get_strategy_metadata(strategy_name)
+
+    return NormalizedBacktestRunRequest(
+        exchange=exchange,
+        symbol=validate_symbol(symbol),
+        timeframe=validate_timeframe(timeframe),
+        start=start,
+        end=end,
+        decision_time=require_utc(decision_time, field_name="decision_time"),
+        dataset_id=dataset_id,
+        registered_dataset_hash=registered_dataset_hash,
+        generated_at=require_exact_utc(generated_at, field_name="generated_at"),
+        initial_capital=Decimal(initial_capital),
+        fee_bps=Decimal(fee_bps),
+        slippage_bps=Decimal(slippage_bps),
+        strategy_name=metadata.name,
+        strategy_version=metadata.version,
+        strategy_parameters=dict(strategy_parameters),
+        sizing=sizing,
+    )
 
 
 def _sha256_json(payload: dict[str, Any]) -> str:
@@ -503,3 +767,8 @@ def _json_default(value: object) -> str:
 
 def _utc_iso(value: datetime) -> str:
     return value.isoformat().replace("+00:00", "Z")
+
+
+def _parse_utc_iso(value: str, field_name: str) -> datetime:
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return require_utc(parsed, field_name=field_name)

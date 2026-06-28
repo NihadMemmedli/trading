@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -30,6 +31,23 @@ class BacktestRunStatus(StrEnum):
 
 
 @dataclass(frozen=True)
+class BacktestSizingConfig:
+    """Explicit sizing and risk limits for deterministic replay."""
+
+    max_exposure: Decimal = Decimal("1")
+    cash_reserve: Decimal = Decimal("0")
+    min_trade_notional: Decimal = Decimal("0")
+
+    def __post_init__(self) -> None:
+        if self.max_exposure < Decimal("0") or self.max_exposure > Decimal("1"):
+            raise MarketDataError("max_exposure must be between 0 and 1")
+        if self.cash_reserve < Decimal("0") or self.cash_reserve >= Decimal("1"):
+            raise MarketDataError("cash_reserve must be between 0 and less than 1")
+        if self.min_trade_notional < Decimal("0"):
+            raise MarketDataError("min_trade_notional must be nonnegative")
+
+
+@dataclass(frozen=True)
 class BacktestConfig:
     """Explicit replay configuration for one symbol and timeframe."""
 
@@ -42,11 +60,15 @@ class BacktestConfig:
     end: datetime
     decision_time: datetime
     strategy_name: str
+    strategy_version: str
     strategy_parameters: StrategyParameters
+    sizing: BacktestSizingConfig = BacktestSizingConfig()
 
     def __post_init__(self) -> None:
         if not self.strategy_name.strip():
             raise MarketDataError("strategy_name cannot be blank")
+        if not self.strategy_version.strip():
+            raise MarketDataError("strategy_version cannot be blank")
         if self.initial_capital <= Decimal("0"):
             raise MarketDataError("initial_capital must be positive")
         if self.fee_bps < Decimal("0"):
@@ -94,6 +116,12 @@ class BacktestMetrics:
     average_exposure: Decimal
     benchmark_total_return: Decimal
     excess_return: Decimal
+    return_observations: int
+    return_mean: Decimal
+    return_stddev: Decimal
+    sharpe_like: Decimal
+    positive_return_periods: int
+    negative_return_periods: int
 
 
 @dataclass(frozen=True)
@@ -101,6 +129,7 @@ class BacktestResult:
     config_hash: str
     dataset_hash: str
     result_hash: str
+    strategy_version: str
     trades_count: int
     final_equity: Decimal
     total_return: Decimal
@@ -118,6 +147,7 @@ class BacktestReport:
     dataset_hash: str
     result_hash: str
     strategy_name: str
+    strategy_version: str
     strategy_parameters: StrategyParameters
     symbol: str
     timeframe: str
@@ -127,8 +157,19 @@ class BacktestReport:
     fee_bps: Decimal
     slippage_bps: Decimal
     initial_capital: Decimal
+    sizing: BacktestSizingConfig
     metrics: BacktestMetrics
     generated_at: datetime
+
+
+@dataclass(frozen=True)
+class ReturnsSummary:
+    observations: int
+    mean: Decimal
+    stddev: Decimal
+    sharpe_like: Decimal
+    positive_periods: int
+    negative_periods: int
 
 
 def run_candle_backtest(
@@ -161,10 +202,12 @@ def run_candle_backtest(
         cash, position, trade = _rebalance_to_target(
             cash=cash,
             position=position,
-            target_position=pending_target,
+            target_position=min(pending_target, config.sizing.max_exposure),
             candle=candle,
             fee_rate=fee_rate,
             slippage_rate=slippage_rate,
+            cash_reserve=config.initial_capital * config.sizing.cash_reserve,
+            min_trade_notional=config.sizing.min_trade_notional,
         )
         if trade is not None:
             trades.append(trade)
@@ -188,6 +231,7 @@ def run_candle_backtest(
     config_hash = deterministic_config_hash(config)
     total_return = (final_equity - config.initial_capital) / config.initial_capital
     benchmark_total_return = _benchmark_total_return(filtered_candles)
+    returns_summary = _returns_summary(equity_curve)
     metrics = BacktestMetrics(
         trades_count=len(trades),
         final_equity=final_equity,
@@ -198,11 +242,18 @@ def run_candle_backtest(
         average_exposure=sum(exposures, Decimal("0")) / Decimal(len(exposures)),
         benchmark_total_return=benchmark_total_return,
         excess_return=total_return - benchmark_total_return,
+        return_observations=returns_summary.observations,
+        return_mean=returns_summary.mean,
+        return_stddev=returns_summary.stddev,
+        sharpe_like=returns_summary.sharpe_like,
+        positive_return_periods=returns_summary.positive_periods,
+        negative_return_periods=returns_summary.negative_periods,
     )
     result = BacktestResult(
         config_hash=config_hash,
         dataset_hash=dataset_hash,
         result_hash="",
+        strategy_version=config.strategy_version,
         trades_count=metrics.trades_count,
         final_equity=metrics.final_equity,
         total_return=metrics.total_return,
@@ -216,6 +267,7 @@ def run_candle_backtest(
         config_hash=result.config_hash,
         dataset_hash=result.dataset_hash,
         result_hash=deterministic_result_hash(result),
+        strategy_version=result.strategy_version,
         trades_count=result.trades_count,
         final_equity=result.final_equity,
         total_return=result.total_return,
@@ -241,6 +293,7 @@ def build_backtest_report(
         dataset_hash=result.dataset_hash,
         result_hash=result.result_hash,
         strategy_name=config.strategy_name,
+        strategy_version=config.strategy_version,
         strategy_parameters=config.strategy_parameters,
         symbol=config.symbol,
         timeframe=config.timeframe,
@@ -250,6 +303,7 @@ def build_backtest_report(
         fee_bps=config.fee_bps,
         slippage_bps=config.slippage_bps,
         initial_capital=config.initial_capital,
+        sizing=config.sizing,
         metrics=result.metrics,
         generated_at=normalized_generated_at,
     )
@@ -259,6 +313,7 @@ def build_backtest_report(
         dataset_hash=report.dataset_hash,
         result_hash=report.result_hash,
         strategy_name=report.strategy_name,
+        strategy_version=report.strategy_version,
         strategy_parameters=report.strategy_parameters,
         symbol=report.symbol,
         timeframe=report.timeframe,
@@ -268,6 +323,7 @@ def build_backtest_report(
         fee_bps=report.fee_bps,
         slippage_bps=report.slippage_bps,
         initial_capital=report.initial_capital,
+        sizing=report.sizing,
         metrics=report.metrics,
         generated_at=report.generated_at,
     )
@@ -295,7 +351,9 @@ def deterministic_config_hash(config: BacktestConfig) -> str:
         "end": config.end,
         "decision_time": config.decision_time,
         "strategy_name": config.strategy_name,
+        "strategy_version": config.strategy_version,
         "strategy_parameters": dict(config.strategy_parameters),
+        "sizing": _sizing_payload(config.sizing),
     }
     return _sha256_json(payload)
 
@@ -304,6 +362,7 @@ def deterministic_result_hash(result: BacktestResult) -> str:
     payload = {
         "config_hash": result.config_hash,
         "dataset_hash": result.dataset_hash,
+        "strategy_version": result.strategy_version,
         "metrics": _metrics_payload(result.metrics),
         "trades": [
             {
@@ -335,6 +394,20 @@ def _metrics_payload(metrics: BacktestMetrics) -> dict[str, Any]:
         "average_exposure": metrics.average_exposure,
         "benchmark_total_return": metrics.benchmark_total_return,
         "excess_return": metrics.excess_return,
+        "return_observations": metrics.return_observations,
+        "return_mean": metrics.return_mean,
+        "return_stddev": metrics.return_stddev,
+        "sharpe_like": metrics.sharpe_like,
+        "positive_return_periods": metrics.positive_return_periods,
+        "negative_return_periods": metrics.negative_return_periods,
+    }
+
+
+def _sizing_payload(sizing: BacktestSizingConfig) -> dict[str, Decimal]:
+    return {
+        "max_exposure": sizing.max_exposure,
+        "cash_reserve": sizing.cash_reserve,
+        "min_trade_notional": sizing.min_trade_notional,
     }
 
 
@@ -344,6 +417,7 @@ def _report_payload(report: BacktestReport, *, include_report_hash: bool) -> dic
         "dataset_hash": report.dataset_hash,
         "result_hash": report.result_hash,
         "strategy_name": report.strategy_name,
+        "strategy_version": report.strategy_version,
         "strategy_parameters": dict(report.strategy_parameters),
         "symbol": report.symbol,
         "timeframe": report.timeframe,
@@ -353,6 +427,7 @@ def _report_payload(report: BacktestReport, *, include_report_hash: bool) -> dic
         "fee_bps": report.fee_bps,
         "slippage_bps": report.slippage_bps,
         "initial_capital": report.initial_capital,
+        "sizing": _sizing_payload(report.sizing),
         "metrics": _metrics_payload(report.metrics),
         "generated_at": report.generated_at,
     }
@@ -384,6 +459,8 @@ def _rebalance_to_target(
     candle: NormalizedCandle,
     fee_rate: Decimal,
     slippage_rate: Decimal,
+    cash_reserve: Decimal,
+    min_trade_notional: Decimal,
 ) -> tuple[Decimal, Decimal, BacktestTrade | None]:
     reference_price = candle.open
     equity = cash + position * reference_price
@@ -394,11 +471,14 @@ def _rebalance_to_target(
 
     if quantity_delta > Decimal("0"):
         fill_price = reference_price * (Decimal("1") + slippage_rate)
-        max_quantity = cash / (fill_price * (Decimal("1") + fee_rate))
+        spendable_cash = max(cash - cash_reserve, Decimal("0"))
+        max_quantity = spendable_cash / (fill_price * (Decimal("1") + fee_rate))
         quantity = min(quantity_delta, max_quantity)
         if quantity <= Decimal("0"):
             return cash, position, None
         notional = quantity * fill_price
+        if notional < min_trade_notional:
+            return cash, position, None
         fee = notional * fee_rate
         slippage = (fill_price - reference_price) * quantity
         return (
@@ -420,6 +500,8 @@ def _rebalance_to_target(
     if quantity <= Decimal("0"):
         return cash, position, None
     notional = quantity * fill_price
+    if notional < min_trade_notional:
+        return cash, position, None
     fee = notional * fee_rate
     slippage = (reference_price - fill_price) * quantity
     return (
@@ -448,6 +530,48 @@ def _max_drawdown(equity_curve: list[EquityPoint]) -> Decimal:
             if drawdown > max_drawdown:
                 max_drawdown = drawdown
     return max_drawdown
+
+
+def _returns_summary(equity_curve: list[EquityPoint]) -> ReturnsSummary:
+    returns: list[Decimal] = []
+    previous_equity = equity_curve[0].equity
+    for point in equity_curve[1:]:
+        if previous_equity > Decimal("0"):
+            returns.append((point.equity - previous_equity) / previous_equity)
+        previous_equity = point.equity
+
+    if not returns:
+        return ReturnsSummary(
+            observations=0,
+            mean=Decimal("0"),
+            stddev=Decimal("0"),
+            sharpe_like=Decimal("0"),
+            positive_periods=0,
+            negative_periods=0,
+        )
+
+    mean = sum(returns, Decimal("0")) / Decimal(len(returns))
+    variance = sum(((value - mean) ** 2 for value in returns), Decimal("0")) / Decimal(len(returns))
+    stddev = _decimal_sqrt(variance)
+    sharpe_like = (
+        Decimal("0")
+        if stddev == Decimal("0")
+        else Decimal(str(math.sqrt(len(returns)))) * mean / stddev
+    )
+    return ReturnsSummary(
+        observations=len(returns),
+        mean=mean,
+        stddev=stddev,
+        sharpe_like=sharpe_like,
+        positive_periods=sum(1 for value in returns if value > Decimal("0")),
+        negative_periods=sum(1 for value in returns if value < Decimal("0")),
+    )
+
+
+def _decimal_sqrt(value: Decimal) -> Decimal:
+    if value <= Decimal("0"):
+        return Decimal("0")
+    return Decimal(str(math.sqrt(float(value))))
 
 
 def _turnover(trades: list[BacktestTrade], initial_capital: Decimal) -> Decimal:
