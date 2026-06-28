@@ -12,6 +12,7 @@ from trading.apps.api.schemas.backtests import (
     BacktestRunCreateRequest,
     BacktestRunListResponse,
     BacktestRunResponse,
+    BacktestRunSummaryResponse,
 )
 from trading.services.backtests import BacktestRunNotFoundError
 
@@ -47,5 +48,5 @@ def list_backtest_runs(
     service: BacktestServiceDependency,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
 ) -> BacktestRunListResponse:
-    runs = [BacktestRunResponse.from_run(run) for run in service.list_runs(limit=limit)]
+    runs = [BacktestRunSummaryResponse.from_run(run) for run in service.list_runs(limit=limit)]
     return BacktestRunListResponse(runs=runs)
