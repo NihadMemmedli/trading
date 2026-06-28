@@ -21,12 +21,22 @@ enabled: boolean
 requires_api_key: boolean
 env_keys: string[]
 rate_limit_policy: string
-freshness_sla_seconds: integer
+freshness_sla_seconds: object<string, integer>
 supports_backfill: boolean
 supports_realtime: boolean
+supported_symbols: string[]
+supported_datasets: string[]
 ```
 
 Adapters fail closed. If configuration is missing or provider health is unknown, the adapter is unavailable and downstream jobs must skip it rather than silently substituting fake data.
+
+Current registry defaults:
+
+| Source | Type | Enabled | Requires API key | Env keys | Supported symbols | Supported datasets | Freshness SLA |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `binance` | `exchange` | yes | no | none | `BTC/USDT`, `ETH/USDT`, `SOL/USDT` | `ohlcv`, `trades`, `order_books` | OHLCV 120s, trades 300s, order books 30s |
+
+Binance public spot data is the only enabled exchange provider in Phase 2. Funding and derivatives metric dataset types are research-only storage contracts until an explicit public data adapter is added. The registry does not declare private exchange credentials, authenticated CCXT behavior, execution methods, wallets, custody, margin, futures, or order placement.
 
 ## Environment Gates
 
@@ -63,6 +73,7 @@ Required data:
 - OHLCV candles for configured symbols and timeframes.
 - Trades where supported and affordable under rate limits.
 - Order book snapshots for explicitly configured venues and depths.
+- Research-only funding and derivatives metrics where a public source is explicitly enabled.
 - Exchange status and market metadata.
 
 Implementation rules:

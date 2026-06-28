@@ -209,3 +209,93 @@ class Trade(Base):
     )
 
     pair: Mapped[TradingPair] = relationship()
+
+
+class OrderBookSnapshot(Base):
+    __tablename__ = "order_book_snapshots"
+    __table_args__ = (
+        CheckConstraint("best_bid > 0", name="order_book_best_bid_positive"),
+        CheckConstraint("best_ask > best_bid", name="order_book_spread_positive"),
+        CheckConstraint("spread_bps >= 0", name="order_book_spread_bps_nonnegative"),
+        CheckConstraint("aggregate_bid_depth >= 0", name="order_book_bid_depth_nonnegative"),
+        CheckConstraint("aggregate_ask_depth >= 0", name="order_book_ask_depth_nonnegative"),
+        Index("ix_order_book_pair_source_timestamp", "pair_id", "source", "timestamp"),
+        Index(
+            "ix_order_book_pit_replay",
+            "pair_id",
+            "source",
+            "available_at",
+            "timestamp",
+        ),
+        Index("ix_order_book_available_at", "available_at"),
+    )
+
+    pair_id: Mapped[int] = mapped_column(ForeignKey("trading_pairs.id"), primary_key=True)
+    source: Mapped[str] = mapped_column(String(64), primary_key=True)
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
+    best_bid: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    best_ask: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    spread_bps: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    bids: Mapped[list[dict[str, str]]] = mapped_column(JSONB, nullable=False)
+    asks: Mapped[list[dict[str, str]]] = mapped_column(JSONB, nullable=False)
+    aggregate_bid_depth: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    aggregate_ask_depth: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    imbalance: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    raw_checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    quality_flags: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    inserted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    pair: Mapped[TradingPair] = relationship()
+
+
+class DerivativesMetric(Base):
+    __tablename__ = "derivatives_metrics"
+    __table_args__ = (
+        CheckConstraint("open_interest IS NULL OR open_interest >= 0", name="open_interest_valid"),
+        CheckConstraint(
+            "long_short_ratio IS NULL OR long_short_ratio >= 0",
+            name="long_short_ratio_valid",
+        ),
+        CheckConstraint(
+            "liquidation_long_volume IS NULL OR liquidation_long_volume >= 0",
+            name="liquidation_long_volume_valid",
+        ),
+        CheckConstraint(
+            "liquidation_short_volume IS NULL OR liquidation_short_volume >= 0",
+            name="liquidation_short_volume_valid",
+        ),
+        Index(
+            "ix_derivatives_metrics_pair_source_timestamp",
+            "pair_id",
+            "source",
+            "timestamp",
+        ),
+        Index(
+            "ix_derivatives_metrics_pit_replay",
+            "pair_id",
+            "source",
+            "available_at",
+            "timestamp",
+        ),
+        Index("ix_derivatives_metrics_available_at", "available_at"),
+    )
+
+    pair_id: Mapped[int] = mapped_column(ForeignKey("trading_pairs.id"), primary_key=True)
+    source: Mapped[str] = mapped_column(String(64), primary_key=True)
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
+    funding_rate: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    open_interest: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    long_short_ratio: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    liquidation_long_volume: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    liquidation_short_volume: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    raw_checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    quality_flags: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    inserted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    pair: Mapped[TradingPair] = relationship()

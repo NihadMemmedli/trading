@@ -15,6 +15,8 @@ from trading.data.archive import RawArchiveResult
 from trading.data.market import (
     IngestionStatus,
     NormalizedCandle,
+    NormalizedDerivativesMetric,
+    NormalizedOrderBookSnapshot,
     NormalizedTrade,
     OhlcvRequest,
     require_utc,
@@ -24,8 +26,10 @@ from trading.db.models import (
     Asset,
     Candle,
     Dataset,
+    DerivativesMetric,
     Exchange,
     IngestionRun,
+    OrderBookSnapshot,
     RawArtifact,
     Trade,
     TradingPair,
@@ -43,6 +47,14 @@ class DuplicateCandleError(ValueError):
 
 class DuplicateTradeError(ValueError):
     """Raised when duplicate trade keys are inserted."""
+
+
+class DuplicateOrderBookSnapshotError(ValueError):
+    """Raised when duplicate order book snapshot keys are inserted."""
+
+
+class DuplicateDerivativesMetricError(ValueError):
+    """Raised when duplicate derivatives metric keys are inserted."""
 
 
 @dataclass(frozen=True)
@@ -229,6 +241,79 @@ class IngestionService:
                 raise DuplicateTradeError("duplicate trade key") from exc
         return len(materialized)
 
+    def insert_order_book_snapshots(
+        self,
+        snapshots: Iterable[NormalizedOrderBookSnapshot],
+    ) -> int:
+        materialized = list(snapshots)
+        if not materialized:
+            return 0
+
+        with session_scope(self._session_factory) as session:
+            try:
+                for snapshot in materialized:
+                    pair = self._get_or_create_pair(session, snapshot.exchange, snapshot.symbol)
+                    session.add(
+                        OrderBookSnapshot(
+                            pair_id=pair.id,
+                            source=snapshot.exchange,
+                            timestamp=snapshot.timestamp,
+                            best_bid=snapshot.best_bid,
+                            best_ask=snapshot.best_ask,
+                            spread_bps=snapshot.spread_bps,
+                            bids=[
+                                {"price": str(level.price), "size": str(level.size)}
+                                for level in snapshot.bids
+                            ],
+                            asks=[
+                                {"price": str(level.price), "size": str(level.size)}
+                                for level in snapshot.asks
+                            ],
+                            aggregate_bid_depth=snapshot.aggregate_bid_depth,
+                            aggregate_ask_depth=snapshot.aggregate_ask_depth,
+                            imbalance=snapshot.imbalance,
+                            available_at=snapshot.available_at,
+                            raw_checksum=snapshot.raw_checksum,
+                            quality_flags=snapshot.quality_flags,
+                        )
+                    )
+                session.flush()
+            except IntegrityError as exc:
+                raise DuplicateOrderBookSnapshotError("duplicate order book snapshot key") from exc
+        return len(materialized)
+
+    def insert_derivatives_metrics(
+        self,
+        metrics: Iterable[NormalizedDerivativesMetric],
+    ) -> int:
+        materialized = list(metrics)
+        if not materialized:
+            return 0
+
+        with session_scope(self._session_factory) as session:
+            try:
+                for metric in materialized:
+                    pair = self._get_or_create_pair(session, metric.exchange, metric.symbol)
+                    session.add(
+                        DerivativesMetric(
+                            pair_id=pair.id,
+                            source=metric.exchange,
+                            timestamp=metric.timestamp,
+                            funding_rate=metric.funding_rate,
+                            open_interest=metric.open_interest,
+                            long_short_ratio=metric.long_short_ratio,
+                            liquidation_long_volume=metric.liquidation_long_volume,
+                            liquidation_short_volume=metric.liquidation_short_volume,
+                            available_at=metric.available_at,
+                            raw_checksum=metric.raw_checksum,
+                            quality_flags=metric.quality_flags,
+                        )
+                    )
+                session.flush()
+            except IntegrityError as exc:
+                raise DuplicateDerivativesMetricError("duplicate derivatives metric key") from exc
+        return len(materialized)
+
     def point_in_time_candles(
         self,
         *,
@@ -327,6 +412,110 @@ class IngestionService:
             for trade in trades:
                 session.expunge(trade)
             return trades
+
+    def point_in_time_order_books(
+        self,
+        *,
+        exchange: str,
+        symbol: str,
+        decision_time: datetime,
+        start_time: datetime | None = None,
+        end_time: datetime | None = None,
+        source: str | None = None,
+        limit: int | None = None,
+    ) -> list[OrderBookSnapshot]:
+        parsed_decision_time = require_utc(decision_time, field_name="decision_time")
+        parsed_start_time = (
+            require_utc(start_time, field_name="start_time") if start_time is not None else None
+        )
+        parsed_end_time = (
+            require_utc(end_time, field_name="end_time") if end_time is not None else None
+        )
+        if (
+            parsed_start_time is not None
+            and parsed_end_time is not None
+            and parsed_start_time >= parsed_end_time
+        ):
+            raise ValueError("start_time must be earlier than end_time")
+        if limit is not None and limit < 1:
+            raise ValueError("limit must be positive")
+
+        with session_scope(self._session_factory) as session:
+            pair = self._find_pair(session, exchange, symbol)
+            if pair is None:
+                return []
+            filters = [
+                OrderBookSnapshot.pair_id == pair.id,
+                OrderBookSnapshot.available_at <= parsed_decision_time,
+            ]
+            if parsed_start_time is not None:
+                filters.append(OrderBookSnapshot.timestamp >= parsed_start_time)
+            if parsed_end_time is not None:
+                filters.append(OrderBookSnapshot.timestamp < parsed_end_time)
+            if source is not None:
+                filters.append(OrderBookSnapshot.source == source)
+
+            query: Select[tuple[OrderBookSnapshot]] = (
+                select(OrderBookSnapshot).where(*filters).order_by(OrderBookSnapshot.timestamp)
+            )
+            if limit is not None:
+                query = query.limit(limit)
+            snapshots = list(session.execute(query).scalars().all())
+            for snapshot in snapshots:
+                session.expunge(snapshot)
+            return snapshots
+
+    def point_in_time_derivatives_metrics(
+        self,
+        *,
+        exchange: str,
+        symbol: str,
+        decision_time: datetime,
+        start_time: datetime | None = None,
+        end_time: datetime | None = None,
+        source: str | None = None,
+        limit: int | None = None,
+    ) -> list[DerivativesMetric]:
+        parsed_decision_time = require_utc(decision_time, field_name="decision_time")
+        parsed_start_time = (
+            require_utc(start_time, field_name="start_time") if start_time is not None else None
+        )
+        parsed_end_time = (
+            require_utc(end_time, field_name="end_time") if end_time is not None else None
+        )
+        if (
+            parsed_start_time is not None
+            and parsed_end_time is not None
+            and parsed_start_time >= parsed_end_time
+        ):
+            raise ValueError("start_time must be earlier than end_time")
+        if limit is not None and limit < 1:
+            raise ValueError("limit must be positive")
+
+        with session_scope(self._session_factory) as session:
+            pair = self._find_pair(session, exchange, symbol)
+            if pair is None:
+                return []
+            filters = [
+                DerivativesMetric.pair_id == pair.id,
+                DerivativesMetric.available_at <= parsed_decision_time,
+            ]
+            if parsed_start_time is not None:
+                filters.append(DerivativesMetric.timestamp >= parsed_start_time)
+            if parsed_end_time is not None:
+                filters.append(DerivativesMetric.timestamp < parsed_end_time)
+            if source is not None:
+                filters.append(DerivativesMetric.source == source)
+
+            query: Select[tuple[DerivativesMetric]] = (
+                select(DerivativesMetric).where(*filters).order_by(DerivativesMetric.timestamp)
+            )
+            if limit is not None:
+                query = query.limit(limit)
+            metrics = list(session.execute(query).scalars().all())
+            for metric in metrics:
+                session.expunge(metric)
+            return metrics
 
     def persist_dataset(
         self,

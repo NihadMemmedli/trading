@@ -11,11 +11,12 @@ from typing import Any
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from trading.data.market import RawOhlcvBatch, RawTradeBatch, parse_timestamp
-from trading.data.quality import parse_trade_timestamp
+from trading.data.market import RawOhlcvBatch, RawOrderBookBatch, RawTradeBatch, parse_timestamp
+from trading.data.quality import parse_order_book_timestamp, parse_trade_timestamp
 
 ARCHIVE_SCHEMA_VERSION = "ohlcv-raw-v1"
 TRADE_ARCHIVE_SCHEMA_VERSION = "trades-raw-v1"
+ORDER_BOOK_ARCHIVE_SCHEMA_VERSION = "orderbook-raw-v1"
 
 
 @dataclass(frozen=True)
@@ -48,6 +49,19 @@ def trade_partition_path(root: Path, batch: RawTradeBatch) -> Path:
         / f"exchange={batch.exchange}"
         / f"symbol={safe_symbol}"
         / "type=trades"
+        / f"year={first_timestamp.year:04d}"
+        / f"month={first_timestamp.month:02d}"
+    )
+
+
+def order_book_partition_path(root: Path, batch: RawOrderBookBatch) -> Path:
+    first_timestamp = parse_order_book_timestamp(batch.rows[0], fallback=batch.fetched_at)
+    safe_symbol = batch.symbol.replace("/", "_")
+    return (
+        root
+        / f"exchange={batch.exchange}"
+        / f"symbol={safe_symbol}"
+        / "type=order_books"
         / f"year={first_timestamp.year:04d}"
         / f"month={first_timestamp.month:02d}"
     )
@@ -158,6 +172,53 @@ def write_raw_trade_parquet(batch: RawTradeBatch, root: Path) -> RawArchiveResul
     )
 
 
+def build_raw_order_book_table(batch: RawOrderBookBatch) -> pa.Table:
+    timestamps = [parse_order_book_timestamp(row, fallback=batch.fetched_at) for row in batch.rows]
+    return pa.table(
+        {
+            "exchange": pa.array([batch.exchange] * len(batch.rows), pa.string()),
+            "symbol": pa.array([batch.symbol] * len(batch.rows), pa.string()),
+            "timestamp": pa.array(timestamps, pa.timestamp("ms", tz="UTC")),
+            "nonce": pa.array(
+                [_optional_string(row.get("nonce")) for row in batch.rows], pa.string()
+            ),
+            "fetched_at": pa.array(
+                [batch.fetched_at] * len(batch.rows),
+                pa.timestamp("ms", tz="UTC"),
+            ),
+            "raw_json": pa.array(
+                [
+                    json.dumps(row, sort_keys=True, default=str, separators=(",", ":"))
+                    for row in batch.rows
+                ],
+                pa.string(),
+            ),
+        }
+    )
+
+
+def write_raw_order_book_parquet(batch: RawOrderBookBatch, root: Path) -> RawArchiveResult:
+    if not batch.rows:
+        raise ValueError("cannot archive an empty raw order book batch")
+
+    destination_dir = order_book_partition_path(root, batch)
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    first_timestamp = parse_order_book_timestamp(batch.rows[0], fallback=batch.fetched_at)
+    filename = f"order_books_{first_timestamp.strftime('%Y%m%dT%H%M%SZ')}_{len(batch.rows)}.parquet"
+    destination = destination_dir / filename
+
+    table = build_raw_order_book_table(batch)
+    pq.write_table(table, destination, compression="zstd")
+    data = destination.read_bytes()
+    return RawArchiveResult(
+        uri=str(destination),
+        checksum=hashlib.sha256(data).hexdigest(),
+        byte_size=len(data),
+        row_count=len(batch.rows),
+        schema_version=ORDER_BOOK_ARCHIVE_SCHEMA_VERSION,
+    )
+
+
 def read_raw_parquet(path: Path) -> RawOhlcvBatch:
     table = pq.ParquetFile(path).read()
     data = table.to_pydict()
@@ -186,6 +247,18 @@ def read_raw_trade_parquet(path: Path) -> RawTradeBatch:
     data = table.to_pydict()
     rows = [json.loads(raw_json) for raw_json in data["raw_json"]]
     return RawTradeBatch(
+        exchange=data["exchange"][0],
+        symbol=data["symbol"][0],
+        rows=rows,
+        fetched_at=data["fetched_at"][0],
+    )
+
+
+def read_raw_order_book_parquet(path: Path) -> RawOrderBookBatch:
+    table = pq.ParquetFile(path).read()
+    data = table.to_pydict()
+    rows = [json.loads(raw_json) for raw_json in data["raw_json"]]
+    return RawOrderBookBatch(
         exchange=data["exchange"][0],
         symbol=data["symbol"][0],
         rows=rows,

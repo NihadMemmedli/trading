@@ -11,10 +11,28 @@ from sqlalchemy.exc import OperationalError
 
 from alembic import command
 from trading.core.settings import Settings
-from trading.data.market import IngestionStatus, OhlcvRequest, RawOhlcvBatch, RawTradeBatch
-from trading.data.quality import normalize_ohlcv_batch, normalize_trade_batch
+from trading.data.market import (
+    IngestionStatus,
+    OhlcvRequest,
+    RawDerivativesMetricBatch,
+    RawOhlcvBatch,
+    RawOrderBookBatch,
+    RawTradeBatch,
+)
+from trading.data.quality import (
+    normalize_derivatives_metric_batch,
+    normalize_ohlcv_batch,
+    normalize_order_book_batch,
+    normalize_trade_batch,
+)
 from trading.db.session import create_db_engine, create_session_factory
-from trading.services.ingestion import DuplicateCandleError, DuplicateTradeError, IngestionService
+from trading.services.ingestion import (
+    DuplicateCandleError,
+    DuplicateDerivativesMetricError,
+    DuplicateOrderBookSnapshotError,
+    DuplicateTradeError,
+    IngestionService,
+)
 from trading.services.ingestion_worker import OhlcvIngestionWorker
 
 pytestmark = pytest.mark.integration
@@ -81,10 +99,24 @@ def test_alembic_timescale_candles_and_point_in_time_queries() -> None:
                 "SELECT table_name FROM _timescaledb_catalog.hypertable WHERE table_name = 'trades'"
             )
         ).scalar_one()
+        order_book_hypertable = connection.execute(
+            sa.text(
+                "SELECT table_name FROM _timescaledb_catalog.hypertable "
+                "WHERE table_name = 'order_book_snapshots'"
+            )
+        ).scalar_one()
+        derivatives_hypertable = connection.execute(
+            sa.text(
+                "SELECT table_name FROM _timescaledb_catalog.hypertable "
+                "WHERE table_name = 'derivatives_metrics'"
+            )
+        ).scalar_one()
 
     assert extension == "timescaledb"
     assert hypertable == "candles"
     assert trades_hypertable == "trades"
+    assert order_book_hypertable == "order_book_snapshots"
+    assert derivatives_hypertable == "derivatives_metrics"
 
     service = IngestionService(create_session_factory(engine))
     batch = RawOhlcvBatch(
@@ -192,6 +224,106 @@ def test_alembic_timescale_candles_and_point_in_time_queries() -> None:
     assert [trade.trade_id for trade in bounded_trade_replay] == ["eth-trade-2"]
     assert missing_trade_pair == []
 
+    order_book_batch = RawOrderBookBatch(
+        exchange="binance",
+        symbol="ETH/USDT",
+        rows=[
+            {
+                "timestamp": "2026-06-01T00:00:20Z",
+                "bids": [["105.00", "1.0"], ["104.90", "2.0"]],
+                "asks": [["105.10", "1.5"], ["105.20", "2.5"]],
+            },
+            {
+                "timestamp": "2026-06-01T00:01:20Z",
+                "bids": [["110.00", "1.0"], ["109.90", "2.0"]],
+                "asks": [["110.10", "1.5"], ["110.20", "2.5"]],
+            },
+        ],
+    )
+    order_books = normalize_order_book_batch(
+        order_book_batch,
+        raw_checksum="integration-order-books",
+        now=datetime(2026, 6, 1, 1, 0, tzinfo=UTC),
+    )
+
+    assert service.insert_order_book_snapshots(order_books) == 2
+    with pytest.raises(DuplicateOrderBookSnapshotError):
+        service.insert_order_book_snapshots(order_books)
+
+    before_order_books_available = service.point_in_time_order_books(
+        exchange="binance",
+        symbol="ETH/USDT",
+        decision_time=datetime(2026, 6, 1, 0, 30, tzinfo=UTC),
+    )
+    bounded_order_book_replay = service.point_in_time_order_books(
+        exchange="binance",
+        symbol="ETH/USDT",
+        decision_time=datetime(2026, 6, 1, 1, 0, tzinfo=UTC),
+        start_time=datetime(2026, 6, 1, 0, 1, tzinfo=UTC),
+        end_time=datetime(2026, 6, 1, 0, 2, tzinfo=UTC),
+        source="binance",
+    )
+    missing_order_book_pair = service.point_in_time_order_books(
+        exchange="binance",
+        symbol="BTC/USDT",
+        decision_time=datetime(2026, 6, 1, 1, 0, tzinfo=UTC),
+    )
+
+    assert before_order_books_available == []
+    assert [snapshot.best_bid for snapshot in bounded_order_book_replay] == [Decimal("110.00")]
+    assert missing_order_book_pair == []
+
+    derivatives_batch = RawDerivativesMetricBatch(
+        exchange="binance",
+        symbol="ETH/USDT",
+        rows=[
+            {
+                "timestamp": "2026-06-01T00:00:00Z",
+                "funding_rate": "0.0001",
+                "open_interest": "1000",
+            },
+            {
+                "timestamp": "2026-06-01T00:01:00Z",
+                "funding_rate": "-0.0002",
+                "long_short_ratio": "1.5",
+                "liquidation_long_volume": "3",
+                "liquidation_short_volume": "4",
+            },
+        ],
+    )
+    derivatives_metrics = normalize_derivatives_metric_batch(
+        derivatives_batch,
+        raw_checksum="integration-derivatives",
+        now=datetime(2026, 6, 1, 1, 0, tzinfo=UTC),
+    )
+
+    assert service.insert_derivatives_metrics(derivatives_metrics) == 2
+    with pytest.raises(DuplicateDerivativesMetricError):
+        service.insert_derivatives_metrics(derivatives_metrics)
+
+    before_derivatives_available = service.point_in_time_derivatives_metrics(
+        exchange="binance",
+        symbol="ETH/USDT",
+        decision_time=datetime(2026, 6, 1, 0, 30, tzinfo=UTC),
+    )
+    bounded_derivatives_replay = service.point_in_time_derivatives_metrics(
+        exchange="binance",
+        symbol="ETH/USDT",
+        decision_time=datetime(2026, 6, 1, 1, 0, tzinfo=UTC),
+        start_time=datetime(2026, 6, 1, 0, 1, tzinfo=UTC),
+        end_time=datetime(2026, 6, 1, 0, 2, tzinfo=UTC),
+        source="binance",
+    )
+    missing_derivatives_pair = service.point_in_time_derivatives_metrics(
+        exchange="binance",
+        symbol="BTC/USDT",
+        decision_time=datetime(2026, 6, 1, 1, 0, tzinfo=UTC),
+    )
+
+    assert before_derivatives_available == []
+    assert [metric.funding_rate for metric in bounded_derivatives_replay] == [Decimal("-0.0002")]
+    assert missing_derivatives_pair == []
+
     with engine.begin() as connection:
         btc_pair_count = connection.execute(
             sa.text("SELECT count(*) FROM trading_pairs WHERE symbol = 'BTC/USDT'")
@@ -208,10 +340,26 @@ def test_alembic_timescale_candles_and_point_in_time_queries() -> None:
                 "WHERE tablename = 'trades' AND indexname = 'ix_trades_pit_replay'"
             )
         ).scalar_one()
+        order_book_pit_index = connection.execute(
+            sa.text(
+                "SELECT indexname FROM pg_indexes "
+                "WHERE tablename = 'order_book_snapshots' "
+                "AND indexname = 'ix_order_book_pit_replay'"
+            )
+        ).scalar_one()
+        derivatives_pit_index = connection.execute(
+            sa.text(
+                "SELECT indexname FROM pg_indexes "
+                "WHERE tablename = 'derivatives_metrics' "
+                "AND indexname = 'ix_derivatives_metrics_pit_replay'"
+            )
+        ).scalar_one()
 
     assert btc_pair_count == 0
     assert pit_index == "ix_candles_pit_replay"
     assert trade_pit_index == "ix_trades_pit_replay"
+    assert order_book_pit_index == "ix_order_book_pit_replay"
+    assert derivatives_pit_index == "ix_derivatives_metrics_pit_replay"
 
     command.downgrade(config, "base")
     command.upgrade(config, "head")

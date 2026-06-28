@@ -7,7 +7,7 @@ from types import ModuleType
 import pytest
 
 from trading.data.adapters import PublicMarketDataAdapter
-from trading.data.market import MarketDataError, OhlcvRequest, TradeRequest
+from trading.data.market import MarketDataError, OhlcvRequest, OrderBookRequest, TradeRequest
 
 
 class FakeExchange:
@@ -52,6 +52,19 @@ class FakeExchange:
                 "amount": "0.125",
             }
         ]
+
+    def fetch_order_book(self, symbol: str, *, limit: int) -> dict[str, object]:
+        assert symbol == "BTC/USDT"
+        assert limit == 20
+        assert "apiKey" not in self.config
+        assert "secret" not in self.config
+        return {
+            "timestamp": 1767225605000,
+            "datetime": "2026-01-01T00:00:05.000Z",
+            "nonce": 42,
+            "bids": [["42000.00", "0.10"]],
+            "asks": [["42001.00", "0.12"]],
+        }
 
     def private_post_order(self) -> None:
         raise AssertionError("private methods must not be used")
@@ -100,6 +113,29 @@ def test_public_adapter_lazily_uses_only_fetch_trades(monkeypatch: pytest.Monkey
             "side": "buy",
             "price": "42001.10",
             "amount": "0.125",
+        }
+    ]
+    assert adapter._load_client().config == {"enableRateLimit": True}  # type: ignore[attr-defined]
+
+
+def test_public_adapter_lazily_uses_only_fetch_order_book(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_ccxt = ModuleType("ccxt")
+    fake_ccxt.binance = FakeExchange  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "ccxt", fake_ccxt)
+
+    adapter = PublicMarketDataAdapter("binance")
+    batch = adapter.fetch_order_book(OrderBookRequest(symbol="BTC/USDT"))
+
+    assert batch.exchange == "binance"
+    assert batch.rows == [
+        {
+            "timestamp": 1767225605000,
+            "datetime": "2026-01-01T00:00:05.000Z",
+            "nonce": 42,
+            "bids": [["42000.00", "0.10"]],
+            "asks": [["42001.00", "0.12"]],
         }
     ]
     assert adapter._load_client().config == {"enableRateLimit": True}  # type: ignore[attr-defined]

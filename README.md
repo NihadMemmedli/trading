@@ -2,7 +2,7 @@
 
 Greenfield research platform for crypto market data ingestion, strategy research, AI-assisted signal evaluation, backtesting, and paper-trading simulation.
 
-Current state: Phase 1 complete, Phase 2 data foundation in progress. The repository has its own local git history, a single runtime package, `trading`, FastAPI health/config/ingestion endpoints, safety-first settings validation, public OHLCV and trade ingestion primitives, raw Parquet archive support, Timescale-backed candle and trade storage, deterministic offline fixtures, tests, and local Postgres/TimescaleDB and Redis services. It still has no trading engine, model pipeline, order execution, wallet, or custody code.
+Current state: Phase 1 complete, Phase 2 data foundation in progress. The repository has its own local git history, a single runtime package, `trading`, FastAPI health/config/ingestion endpoints, safety-first settings validation, public OHLCV, trade, top-20 order book ingestion primitives, Binance public spot provider registry metadata, research-only funding/derivatives metric DTOs and storage primitives, raw Parquet archive support, Timescale-backed candle, trade, order book, and derivatives metric storage, deterministic offline fixtures, tests, and local Postgres/TimescaleDB and Redis services. It still has no trading engine, model pipeline, order execution, wallet, or custody code.
 
 ## Safety Boundaries
 
@@ -69,7 +69,7 @@ Planned modules:
 - `trading.apps.api`: FastAPI service for health, version, and safe config in Phase 1; later ingestion, features, agents, strategy, risk, backtests, and paper trading
 - `trading.apps.workers`: placeholder worker entrypoint in Phase 1; later background jobs for ingestion, feature generation, agent runs, backtests, and paper sessions
 - `apps/dashboard`: Streamlit MVP dashboard after the core API stabilizes
-- `trading.data`: provider adapters, normalized market data, order books, funding, fundamentals, news, and sentiment inputs
+- `trading.data`: provider adapters and registry metadata, normalized market data, order books, funding, fundamentals, news, and sentiment inputs
 - `trading.data.offline`: deterministic fixture loading for offline research and future backtests
 - `trading.features`: feature engineering, labeling, point-in-time joins, and feature store access
 - `trading.agents`: strict-JSON analyst agents and trade proposal generation

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
 from typing import Any
@@ -42,12 +42,31 @@ def require_utc(value: datetime, *, field_name: str) -> datetime:
     return value.astimezone(UTC)
 
 
+def require_exact_utc(value: datetime, *, field_name: str) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise MarketDataError(f"{field_name} must be timezone-aware")
+    if value.utcoffset() != timedelta(0):
+        raise MarketDataError(f"{field_name} must be UTC")
+    return value.astimezone(UTC)
+
+
 def parse_timestamp(value: datetime | str | int | float, *, field_name: str) -> datetime:
     if isinstance(value, datetime):
         return require_utc(value, field_name=field_name)
     if isinstance(value, str):
         normalized = value.replace("Z", "+00:00")
         return require_utc(datetime.fromisoformat(normalized), field_name=field_name)
+    if isinstance(value, int | float):
+        return datetime.fromtimestamp(value / 1000, UTC)
+    raise MarketDataError(f"{field_name} must be a datetime, ISO timestamp, or epoch ms")
+
+
+def parse_exact_utc_timestamp(value: datetime | str | int | float, *, field_name: str) -> datetime:
+    if isinstance(value, datetime):
+        return require_exact_utc(value, field_name=field_name)
+    if isinstance(value, str):
+        normalized = value.replace("Z", "+00:00")
+        return require_exact_utc(datetime.fromisoformat(normalized), field_name=field_name)
     if isinstance(value, int | float):
         return datetime.fromtimestamp(value / 1000, UTC)
     raise MarketDataError(f"{field_name} must be a datetime, ISO timestamp, or epoch ms")
@@ -165,6 +184,79 @@ class TradeRequest(BaseModel):
         return self
 
 
+class OrderBookRequest(BaseModel):
+    """Request for a public spot order book snapshot."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    exchange: str = Field(default="binance", min_length=1, max_length=64)
+    symbol: str
+    limit: int = 20
+
+    @field_validator("exchange")
+    @classmethod
+    def normalize_exchange(cls, value: str) -> str:
+        exchange = value.strip().lower()
+        if exchange != "binance":
+            raise ValueError("only binance public spot order books are supported in this phase")
+        return exchange
+
+    @field_validator("symbol")
+    @classmethod
+    def validate_request_symbol(cls, value: str) -> str:
+        return validate_symbol(value)
+
+    @field_validator("limit")
+    @classmethod
+    def validate_limit(cls, value: int) -> int:
+        if value != 20:
+            raise ValueError("only top-20 order book snapshots are supported in this phase")
+        return value
+
+
+class DerivativesMetricRequest(BaseModel):
+    """Request for research-only derivatives metrics."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    exchange: str = Field(default="binance", min_length=1, max_length=64)
+    symbol: str
+    since: datetime | None = None
+    until: datetime | None = None
+    limit: int = Field(default=500, ge=1, le=1000)
+
+    @field_validator("exchange")
+    @classmethod
+    def normalize_exchange(cls, value: str) -> str:
+        exchange = value.strip().lower()
+        if exchange != "binance":
+            raise ValueError(
+                "only binance research derivatives metrics are supported in this phase"
+            )
+        return exchange
+
+    @field_validator("symbol")
+    @classmethod
+    def validate_request_symbol(cls, value: str) -> str:
+        return validate_symbol(value)
+
+    @field_validator("since", "until")
+    @classmethod
+    def validate_datetime(cls, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        parsed = require_utc(value, field_name="datetime")
+        if parsed > utc_now():
+            raise ValueError("timestamp cannot be in the future")
+        return parsed
+
+    @model_validator(mode="after")
+    def validate_range(self) -> DerivativesMetricRequest:
+        if self.since is not None and self.until is not None and self.since >= self.until:
+            raise ValueError("since must be earlier than until")
+        return self
+
+
 class RawOhlcvBatch(BaseModel):
     """Raw public OHLCV rows as returned by an exchange adapter."""
 
@@ -194,6 +286,48 @@ class RawOhlcvBatch(BaseModel):
 
 class RawTradeBatch(BaseModel):
     """Raw public trade rows as returned by an exchange adapter."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    exchange: str
+    symbol: str
+    rows: list[dict[str, Any]]
+    fetched_at: datetime = Field(default_factory=utc_now)
+
+    @field_validator("symbol")
+    @classmethod
+    def validate_batch_symbol(cls, value: str) -> str:
+        return validate_symbol(value)
+
+    @field_validator("fetched_at")
+    @classmethod
+    def validate_fetched_at(cls, value: datetime) -> datetime:
+        return require_utc(value, field_name="fetched_at")
+
+
+class RawOrderBookBatch(BaseModel):
+    """Raw public order book snapshots as returned by an exchange adapter."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    exchange: str
+    symbol: str
+    rows: list[dict[str, Any]]
+    fetched_at: datetime = Field(default_factory=utc_now)
+
+    @field_validator("symbol")
+    @classmethod
+    def validate_batch_symbol(cls, value: str) -> str:
+        return validate_symbol(value)
+
+    @field_validator("fetched_at")
+    @classmethod
+    def validate_fetched_at(cls, value: datetime) -> datetime:
+        return require_utc(value, field_name="fetched_at")
+
+
+class RawDerivativesMetricBatch(BaseModel):
+    """Raw research-only derivatives metric rows as returned by a data source."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -262,6 +396,79 @@ class NormalizedCandle(BaseModel):
         return self
 
 
+class OrderBookLevel(BaseModel):
+    """One normalized order book price level."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    price: Decimal
+    size: Decimal
+
+    @model_validator(mode="after")
+    def validate_level(self) -> OrderBookLevel:
+        if not self.price.is_finite() or not self.size.is_finite():
+            raise ValueError("order book level values must be finite")
+        if self.price <= Decimal("0"):
+            raise ValueError("order book prices must be positive")
+        if self.size < Decimal("0"):
+            raise ValueError("order book sizes must be nonnegative")
+        return self
+
+
+class NormalizedOrderBookSnapshot(BaseModel):
+    """Normalized public order book snapshot ready for persistence."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    exchange: str
+    symbol: str
+    timestamp: datetime
+    best_bid: Decimal
+    best_ask: Decimal
+    spread_bps: Decimal
+    bids: list[OrderBookLevel]
+    asks: list[OrderBookLevel]
+    aggregate_bid_depth: Decimal
+    aggregate_ask_depth: Decimal
+    imbalance: Decimal
+    available_at: datetime
+    raw_checksum: str
+    quality_flags: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("symbol")
+    @classmethod
+    def validate_snapshot_symbol(cls, value: str) -> str:
+        return validate_symbol(value)
+
+    @field_validator("timestamp", "available_at")
+    @classmethod
+    def validate_snapshot_datetime(cls, value: datetime) -> datetime:
+        parsed = require_exact_utc(value, field_name="order book timestamp")
+        if parsed > utc_now():
+            raise ValueError("order book timestamp cannot be in the future")
+        return parsed
+
+    @model_validator(mode="after")
+    def validate_snapshot_values(self) -> NormalizedOrderBookSnapshot:
+        if not self.bids or not self.asks:
+            raise ValueError("order book must contain bids and asks")
+        if self.best_bid != self.bids[0].price:
+            raise ValueError("best_bid must match the first bid level")
+        if self.best_ask != self.asks[0].price:
+            raise ValueError("best_ask must match the first ask level")
+        if self.best_bid >= self.best_ask:
+            raise ValueError("order book cannot be crossed")
+        if min(
+            self.spread_bps,
+            self.aggregate_bid_depth,
+            self.aggregate_ask_depth,
+        ) < Decimal("0"):
+            raise ValueError("order book aggregate values must be nonnegative")
+        if self.available_at < self.timestamp:
+            raise ValueError("available_at cannot be earlier than timestamp")
+        return self
+
+
 class NormalizedTrade(BaseModel):
     """Normalized public trade ready for persistence."""
 
@@ -303,6 +510,60 @@ class NormalizedTrade(BaseModel):
     def validate_trade_values(self) -> NormalizedTrade:
         if min(self.price, self.amount) < Decimal("0"):
             raise ValueError("trade price and amount must be nonnegative")
+        if self.available_at < self.timestamp:
+            raise ValueError("available_at cannot be earlier than timestamp")
+        return self
+
+
+class NormalizedDerivativesMetric(BaseModel):
+    """Normalized research-only derivatives metrics ready for persistence."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    exchange: str
+    symbol: str
+    timestamp: datetime
+    funding_rate: Decimal
+    open_interest: Decimal | None = None
+    long_short_ratio: Decimal | None = None
+    liquidation_long_volume: Decimal | None = None
+    liquidation_short_volume: Decimal | None = None
+    available_at: datetime
+    raw_checksum: str
+    quality_flags: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("symbol")
+    @classmethod
+    def validate_metric_symbol(cls, value: str) -> str:
+        return validate_symbol(value)
+
+    @field_validator("timestamp", "available_at")
+    @classmethod
+    def validate_metric_datetime(cls, value: datetime) -> datetime:
+        parsed = require_utc(value, field_name="derivatives metric timestamp")
+        if parsed > utc_now():
+            raise ValueError("derivatives metric timestamp cannot be in the future")
+        return parsed
+
+    @model_validator(mode="after")
+    def validate_metric_values(self) -> NormalizedDerivativesMetric:
+        values = [
+            self.funding_rate,
+            self.open_interest,
+            self.long_short_ratio,
+            self.liquidation_long_volume,
+            self.liquidation_short_volume,
+        ]
+        if any(value is not None and not value.is_finite() for value in values):
+            raise ValueError("derivatives metric values must be finite")
+        nonnegative_values = [
+            self.open_interest,
+            self.long_short_ratio,
+            self.liquidation_long_volume,
+            self.liquidation_short_volume,
+        ]
+        if any(value is not None and value < Decimal("0") for value in nonnegative_values):
+            raise ValueError("derivatives metric optional values must be nonnegative")
         if self.available_at < self.timestamp:
             raise ValueError("available_at cannot be earlier than timestamp")
         return self

@@ -8,13 +8,16 @@ from typing import Protocol
 from trading.data.market import (
     MarketDataError,
     OhlcvRequest,
+    OrderBookRequest,
     RawOhlcvBatch,
+    RawOrderBookBatch,
     RawTradeBatch,
     TradeRequest,
     parse_timestamp,
 )
+from trading.data.providers import enabled_public_exchange_names
 
-PUBLIC_EXCHANGES = frozenset({"binance"})
+PUBLIC_EXCHANGES = frozenset(enabled_public_exchange_names())
 
 
 def _trade_timestamp_ms(row: dict[str, object]) -> int:
@@ -39,6 +42,13 @@ class PublicTradeAdapter(Protocol):
 
     def fetch_trades(self, request: TradeRequest) -> RawTradeBatch:
         """Fetch public trade rows without credentials or private endpoints."""
+
+
+class PublicOrderBookAdapter(Protocol):
+    """Public spot order book adapter contract."""
+
+    def fetch_order_book(self, request: OrderBookRequest) -> RawOrderBookBatch:
+        """Fetch a public order book snapshot without credentials or private endpoints."""
 
 
 class PublicMarketDataAdapter:
@@ -113,4 +123,25 @@ class PublicMarketDataAdapter:
             exchange=request.exchange,
             symbol=request.symbol,
             rows=rows,
+        )
+
+    def fetch_order_book(self, request: OrderBookRequest) -> RawOrderBookBatch:
+        if request.exchange != self.exchange_name:
+            raise MarketDataError(f"adapter configured for {self.exchange_name}")
+
+        client = self._load_client()
+        markets = client.load_markets()  # type: ignore[attr-defined]
+        market = markets.get(request.symbol)
+        if market is None or not bool(market.get("spot")):
+            raise MarketDataError(f"{request.symbol} is not a public spot market")
+
+        row = client.fetch_order_book(  # type: ignore[attr-defined]
+            request.symbol,
+            limit=20,
+        )
+        raw_row = dict(row)
+        return RawOrderBookBatch(
+            exchange=request.exchange,
+            symbol=request.symbol,
+            rows=[raw_row],
         )

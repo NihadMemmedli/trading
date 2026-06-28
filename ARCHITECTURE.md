@@ -30,6 +30,7 @@ Phase 0 defines the technical spine for a greenfield crypto AI trading research 
 The platform owns:
 
 - Exchange market data ingestion
+- Provider registry metadata for source enablement, freshness SLAs, credentials, symbols, and datasets
 - Raw data archiving
 - Normalized candle and trade storage
 - Feature generation
@@ -199,7 +200,8 @@ Timescale hypertables:
 
 - `candles`
 - `trades`
-- `order_book_snapshots`, optional after candles and trades are stable
+- `order_book_snapshots`
+- `derivatives_metrics`
 - `features`, if feature volume remains queryable in Postgres
 
 Large feature matrices may move to Parquet if database storage becomes inefficient.
@@ -217,7 +219,7 @@ Core tables and constraints:
 | `trading_pairs` | id, exchange_id, base_asset_id, quote_asset_id, symbol, precision fields, min_order_size, is_active | unique exchange/symbol; index base/quote assets |
 | `candles` | pair_id, timeframe, timestamp, open, high, low, close, volume, source, ingested_at, available_at | unique pair/timeframe/timestamp/source; index pair/timeframe/timestamp |
 | `trades` | pair_id, source, trade_id, timestamp, side, price, amount, available_at | unique pair/source/timestamp/trade_id; index pair/source/available_at/timestamp |
-| `orderbook_snapshots` | pair_id, timestamp, best_bid, best_ask, spread_bps, depth fields, imbalance, source, ingested_at, available_at | index pair/timestamp; reject negative prices/spreads |
+| `order_book_snapshots` | pair_id, source, timestamp, best_bid, best_ask, spread_bps, bids, asks, aggregate depths, imbalance, available_at | unique pair/source/timestamp; top-20 bid/ask JSONB arrays; index pair/source/available_at/timestamp |
 | `derivatives_metrics` | pair_id, timestamp, funding_rate, open_interest, long_short_ratio, liquidation fields, source, ingested_at, available_at | index pair/timestamp; spot MVP may leave empty |
 | `protocol_metrics` | asset_id, timestamp, tvl_usd, fees_usd, revenue_usd, dex_volume_usd, stablecoin_supply_usd, source, ingested_at, available_at | unique asset/timestamp/source; index asset/timestamp |
 | `news_items` | id, asset_id nullable, source, title, url_hash, published_at, collected_at, available_at, content_hash, raw_text, relevance_score | unique url_hash/source and content_hash/source; index published_at and asset_id |

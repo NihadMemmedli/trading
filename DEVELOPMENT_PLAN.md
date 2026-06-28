@@ -43,12 +43,13 @@ Exit criteria:
 
 ## Phase 2: Data Foundation
 
-Status: in progress. Public OHLCV ingestion, public trade ingestion primitives, raw archive writes, normalized candle and trade persistence, point-in-time candle and trade reads, and deterministic offline fixtures are implemented for the MVP symbol universe.
+Status: in progress. Public OHLCV, public trade, public top-20 order book ingestion primitives, Binance public spot provider registry metadata, research-only funding/derivatives metric interfaces, raw archive writes, normalized candle, trade, order book, and derivatives metric persistence, point-in-time candle, trade, order book, and derivatives metric reads, and deterministic offline fixtures are implemented for the MVP symbol universe.
 
 Deliverables:
 
-- Market data interfaces for candles, trades, order books, and funding rates
+- Market data interfaces for candles, trades, order books, funding rates, and derivatives metrics
 - Exchange market-data client abstraction; sandbox order submission remains deferred
+- Provider registry metadata for source enablement, freshness, credentials, symbols, and datasets
 - Historical data storage format and schema
 - Database migrations matching the schema contract in `ARCHITECTURE.md`
 - Data validation checks for gaps, duplicates, timestamp drift, and symbol normalization
@@ -56,10 +57,10 @@ Deliverables:
 
 Exit criteria:
 
-- Backtests can load deterministic historical candle and trade data without network access.
-- Data quality failures for timestamps, duplicates, gaps, invalid OHLCV ranges, malformed trade sides, invalid trade values, and symbols are explicit and test-covered.
-- UTC timestamp validation, duplicate candle and trade constraints, bounded point-in-time reads, and point-in-time indexes are tested.
-- Remaining before Phase 2 completion: order book snapshots, funding/derivatives interfaces, and provider registry metadata.
+- Backtests can load deterministic historical candle, trade, and order book snapshot data without network access.
+- Data quality failures for timestamps, duplicates, gaps, invalid OHLCV ranges, malformed trade sides, invalid trade values, malformed order books, malformed derivatives metrics, and symbols are explicit and test-covered.
+- UTC timestamp validation, duplicate candle, trade, order book, and derivatives metric constraints, bounded point-in-time reads, and point-in-time indexes are tested.
+- Remaining before Phase 2 completion: final review and commit of the data foundation slices.
 
 ## Phase 3: Research and Backtesting
 
