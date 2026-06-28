@@ -12,7 +12,9 @@ from trading.services.model_experiments import (
     _normalize_windows,
     _validate_window_shape,
     deterministic_experiment_hash,
+    deterministic_label_hash,
     deterministic_model_parameter_hash,
+    deterministic_prediction_hash,
     deterministic_split_hash,
     evaluate_previous_return_direction_baseline,
 )
@@ -100,6 +102,71 @@ def test_split_hash_and_model_parameter_hash_are_deterministic() -> None:
     assert deterministic_model_parameter_hash({"alpha": 1, "layers": [8, 4]}) == (
         deterministic_model_parameter_hash({"layers": [8, 4], "alpha": 1})
     )
+
+
+def test_label_and_prediction_hashes_are_deterministic() -> None:
+    experiment_id = "11111111-1111-1111-1111-111111111111"
+    decision_time = datetime(2026, 1, 1, 1, tzinfo=UTC)
+    observed_at = datetime(2026, 1, 1, 1, 1, tzinfo=UTC)
+    first_label_hash = deterministic_label_hash(
+        dataset_id=1,
+        feature_set_id=2,
+        feature_row_id=3,
+        feature_hash="a" * 64,
+        label_name="forward_return_1",
+        label_value={"return": "0.1", "direction": "up"},
+        decision_time=decision_time,
+        observed_at=observed_at,
+        metadata={"horizon": "1m", "source": "test"},
+    )
+    second_label_hash = deterministic_label_hash(
+        dataset_id=1,
+        feature_set_id=2,
+        feature_row_id=3,
+        feature_hash="a" * 64,
+        label_name="forward_return_1",
+        label_value={"direction": "up", "return": "0.1"},
+        decision_time=decision_time,
+        observed_at=observed_at,
+        metadata={"source": "test", "horizon": "1m"},
+    )
+    first_prediction_hash = deterministic_prediction_hash(
+        model_experiment_id=experiment_id,
+        dataset_id=1,
+        feature_set_id=2,
+        split_definition_id=4,
+        feature_row_id=3,
+        feature_hash="a" * 64,
+        prediction_value={"score": "0.7", "direction": "up"},
+        confidence="0.8",
+        decision_time=decision_time,
+        lineage={"code_version": "model_v1", "feature_set_hash": "f" * 64},
+    )
+    second_prediction_hash = deterministic_prediction_hash(
+        model_experiment_id=experiment_id,
+        dataset_id=1,
+        feature_set_id=2,
+        split_definition_id=4,
+        feature_row_id=3,
+        feature_hash="a" * 64,
+        prediction_value={"direction": "up", "score": "0.7"},
+        confidence="0.8",
+        decision_time=decision_time,
+        lineage={"feature_set_hash": "f" * 64, "code_version": "model_v1"},
+    )
+
+    assert first_label_hash == second_label_hash
+    assert first_prediction_hash == second_prediction_hash
+    assert len(first_label_hash) == 64
+    assert len(first_prediction_hash) == 64
+
+
+def test_feature_rows_do_not_embed_labels() -> None:
+    row = baseline_row(1, 1, "0.10")
+
+    assert "label" not in row.features
+    assert "labels" not in row.features
+    assert "target" not in row.features
 
 
 def test_previous_return_direction_baseline_metrics_are_deterministic() -> None:

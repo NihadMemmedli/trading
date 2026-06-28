@@ -81,12 +81,12 @@ Exit criteria:
 
 ## Phase 4: AI Signal Pipeline
 
-Status: contract, feature-set registry, model experiment spine, and deterministic baseline evaluation slices are complete. Strict analyst report, trade proposal, and risk decision schemas are implemented with JSONB-backed persistence, API routes, Alembic migration `20260627_0011_ai_signal_contracts.py`, and tests. Feature-set metadata, deterministic low-volume candle features, feature row lineage, point-in-time reads, and API routes are implemented with Alembic migration `20260627_0012_feature_sets.py`. Train/validation/test split definitions, walk-forward windows, model experiment records, lineage hashes, metrics/status metadata, and API routes are implemented with Alembic migration `20260627_0013_model_experiment_spine.py`. The `previous_return_direction` baseline evaluator computes walk-forward/holdout metrics from persisted feature rows and stores them as succeeded model experiments. Model adapters, training orchestration, paper-trading integration, and execution paths remain deferred.
+Status: contract, feature-set registry, model experiment spine, deterministic baseline evaluation, and prediction/label contract slices are complete. Strict analyst report, trade proposal, and risk decision schemas are implemented with JSONB-backed persistence, API routes, Alembic migration `20260627_0011_ai_signal_contracts.py`, and tests. Feature-set metadata, deterministic low-volume candle features, feature row lineage, point-in-time reads, and API routes are implemented with Alembic migration `20260627_0012_feature_sets.py`. Train/validation/test split definitions, walk-forward windows, model experiment records, lineage hashes, metrics/status metadata, and API routes are implemented with Alembic migration `20260627_0013_model_experiment_spine.py`. Persisted labels, model predictions, row-hash validation, and a minimal metric-threshold promotion gate are implemented with Alembic migration `20260628_0014_prediction_label_contract.py`. The `previous_return_direction` baseline evaluator computes walk-forward/holdout metrics from persisted feature rows and stores them as succeeded model experiments. Model adapters, training orchestration, paper-trading integration, and execution paths remain deferred.
 
 Deliverables:
 
 - Feature pipeline with strict train/test separation; feature-set registry and point-in-time MVP candle materialization are complete
-- Model evaluation workflow with walk-forward validation; split/experiment metadata spine and deterministic baseline evaluation are complete
+- Model evaluation workflow with walk-forward validation; split/experiment metadata spine, deterministic baseline evaluation, persisted labels, persisted predictions, and minimal promotion gate are complete
 - Prompt/model adapters only where they add measurable value
 - Guardrails against look-ahead bias, leakage, and overfitting
 - Strict JSON schemas for analyst outputs, trade proposals, and risk decisions: complete for the initial persistence/API contract slice
@@ -94,7 +94,7 @@ Deliverables:
 Exit criteria:
 
 - AI signals are evaluated against deterministic baselines.
-- Promotion requires documented evidence, not anecdotal performance.
+- Promotion requires documented metrics and a passing gate, not anecdotal performance.
 - Malformed agent output cannot create persisted reports, proposals, risk decisions, or execution events.
 
 ## Phase 5: Paper Trading

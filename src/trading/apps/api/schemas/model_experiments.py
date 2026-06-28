@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -17,7 +18,16 @@ from trading.services.model_experiments import (
     BaselineEvaluationRequest as ServiceBaselineEvaluationRequest,
 )
 from trading.services.model_experiments import (
+    LabelCreateRequest as ServiceLabelCreateRequest,
+)
+from trading.services.model_experiments import (
     ModelExperimentCreateRequest as ServiceModelExperimentCreateRequest,
+)
+from trading.services.model_experiments import (
+    ModelPredictionCreateRequest as ServiceModelPredictionCreateRequest,
+)
+from trading.services.model_experiments import (
+    PromotionGateRequest as ServicePromotionGateRequest,
 )
 from trading.services.model_experiments import (
     SplitDefinitionCreateRequest as ServiceSplitDefinitionCreateRequest,
@@ -171,6 +181,95 @@ class BaselineEvaluationRequest(BaseModel):
         )
 
 
+class LabelCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    dataset_id: int = Field(ge=1)
+    feature_set_id: int = Field(ge=1)
+    feature_row_id: int = Field(ge=1)
+    feature_hash: str = Field(min_length=64, max_length=64)
+    label_name: str = Field(min_length=1, max_length=128)
+    label_value: dict[str, Any]
+    observed_at: datetime
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("feature_hash")
+    @classmethod
+    def normalize_feature_hash(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if len(normalized) != 64 or any(char not in "0123456789abcdef" for char in normalized):
+            raise ValueError("feature_hash must be a SHA-256 hex digest")
+        return normalized
+
+    @field_validator("observed_at")
+    @classmethod
+    def validate_observed_at(cls, value: datetime) -> datetime:
+        return require_utc(value, field_name="observed_at")
+
+    def to_service_request(self) -> ServiceLabelCreateRequest:
+        return ServiceLabelCreateRequest(
+            dataset_id=self.dataset_id,
+            feature_set_id=self.feature_set_id,
+            feature_row_id=self.feature_row_id,
+            feature_hash=self.feature_hash,
+            label_name=self.label_name,
+            label_value=self.label_value,
+            observed_at=self.observed_at,
+            metadata=self.metadata,
+        )
+
+
+class ModelPredictionCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    model_experiment_id: uuid.UUID
+    feature_set_id: int = Field(ge=1)
+    feature_row_id: int = Field(ge=1)
+    feature_hash: str = Field(min_length=64, max_length=64)
+    prediction_value: dict[str, Any]
+    confidence: Decimal = Field(ge=0, le=1)
+    decision_time: datetime
+    lineage: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("feature_hash")
+    @classmethod
+    def normalize_feature_hash(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if len(normalized) != 64 or any(char not in "0123456789abcdef" for char in normalized):
+            raise ValueError("feature_hash must be a SHA-256 hex digest")
+        return normalized
+
+    @field_validator("decision_time")
+    @classmethod
+    def validate_decision_time(cls, value: datetime) -> datetime:
+        return require_utc(value, field_name="decision_time")
+
+    def to_service_request(self) -> ServiceModelPredictionCreateRequest:
+        return ServiceModelPredictionCreateRequest(
+            model_experiment_id=self.model_experiment_id,
+            feature_set_id=self.feature_set_id,
+            feature_row_id=self.feature_row_id,
+            feature_hash=self.feature_hash,
+            prediction_value=self.prediction_value,
+            confidence=self.confidence,
+            decision_time=self.decision_time,
+            lineage=self.lineage,
+        )
+
+
+class PromotionGateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    metric_path: str = Field(min_length=1, max_length=256)
+    minimum_value: Decimal
+
+    def to_service_request(self) -> ServicePromotionGateRequest:
+        return ServicePromotionGateRequest(
+            metric_path=self.metric_path,
+            minimum_value=self.minimum_value,
+        )
+
+
 class SplitWindowResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -223,3 +322,64 @@ class ModelExperimentResponse(BaseModel):
 
 class ModelExperimentListResponse(BaseModel):
     model_experiments: list[ModelExperimentResponse] = Field(default_factory=list)
+
+
+class LabelResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    dataset_id: int
+    feature_set_id: int
+    feature_row_id: int
+    pair_id: int
+    timeframe: str
+    timestamp: datetime
+    feature_hash: str
+    label_name: str
+    label_value: dict[str, Any]
+    label_hash: str
+    decision_time: datetime
+    observed_at: datetime
+    metadata: dict[str, Any]
+    created_at: datetime
+
+
+class LabelListResponse(BaseModel):
+    labels: list[LabelResponse] = Field(default_factory=list)
+
+
+class ModelPredictionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    model_experiment_id: uuid.UUID
+    dataset_id: int
+    feature_set_id: int
+    split_definition_id: int
+    feature_row_id: int
+    pair_id: int
+    timeframe: str
+    timestamp: datetime
+    feature_hash: str
+    prediction_value: dict[str, Any]
+    confidence: Decimal
+    decision_time: datetime
+    feature_row_decision_time: datetime
+    prediction_hash: str
+    lineage: dict[str, Any]
+    created_at: datetime
+
+
+class ModelPredictionListResponse(BaseModel):
+    model_predictions: list[ModelPredictionResponse] = Field(default_factory=list)
+
+
+class PromotionGateResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    model_experiment_id: uuid.UUID
+    approved: bool
+    metric_path: str
+    metric_value: Decimal | None
+    minimum_value: Decimal
+    reason: str
