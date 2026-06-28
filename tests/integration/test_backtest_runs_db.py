@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -8,11 +9,14 @@ from pathlib import Path
 import pytest
 import sqlalchemy as sa
 from alembic.config import Config
+from fastapi.testclient import TestClient
 from sqlalchemy.exc import OperationalError
 
 from alembic import command
+from trading.apps.api import create_app
 from trading.backtesting import BacktestRunStatus
 from trading.core.settings import Settings
+from trading.data.archive import RawArchiveResult
 from trading.data.market import RawOhlcvBatch
 from trading.data.quality import normalize_ohlcv_batch
 from trading.db.models import BacktestEquityPoint, BacktestRun, BacktestTrade, Dataset
@@ -24,6 +28,7 @@ from trading.services.backtests import (
     deterministic_backtest_dataset_name,
     deterministic_candle_dataset_hash,
 )
+from trading.services.datasets import DatasetNotFoundError, DatasetService
 from trading.services.ingestion import IngestionService
 
 pytestmark = pytest.mark.integration
@@ -285,3 +290,151 @@ def test_backtest_runs_migration_and_real_db_persistence(tmp_path: Path) -> None
     assert historical_retrieved.dataset_id is None
     assert historical_retrieved.trades == []
     assert historical_retrieved.equity_points == []
+
+
+def test_backtest_dataset_lineage_upgrade_preserves_existing_runs() -> None:
+    settings = require_postgres()
+    config = alembic_config(settings)
+    command.downgrade(config, "base")
+    command.upgrade(config, "20260627_0008")
+
+    engine = create_db_engine(settings)
+    request = backtest_request()
+    existing_run_id = uuid.uuid4()
+    with engine.begin() as connection:
+        connection.execute(
+            sa.text(
+                "INSERT INTO backtest_runs ("
+                'id, status, exchange, symbol, timeframe, start, "end", decision_time, '
+                "generated_at, initial_capital, fee_bps, slippage_bps, strategy_name, "
+                "strategy_parameters, dataset_hash, config_hash, result_hash, report_hash, "
+                "metrics_json, report_json, artifact_path, started_at, completed_at, "
+                "error_message"
+                ") VALUES ("
+                ":id, 'succeeded', :exchange, :symbol, :timeframe, :start, :end, "
+                ":decision_time, :generated_at, :initial_capital, :fee_bps, :slippage_bps, "
+                ":strategy_name, CAST(:strategy_parameters AS jsonb), :dataset_hash, "
+                ":config_hash, :result_hash, :report_hash, CAST(:metrics_json AS jsonb), "
+                "CAST(:report_json AS jsonb), NULL, :started_at, :completed_at, NULL"
+                ")"
+            ),
+            {
+                "id": existing_run_id,
+                "exchange": request.exchange,
+                "symbol": request.symbol,
+                "timeframe": request.timeframe,
+                "start": request.start,
+                "end": request.end,
+                "decision_time": request.decision_time,
+                "generated_at": request.generated_at,
+                "initial_capital": request.initial_capital,
+                "fee_bps": request.fee_bps,
+                "slippage_bps": request.slippage_bps,
+                "strategy_name": request.strategy_name,
+                "strategy_parameters": '{"short_window": 1, "long_window": 2}',
+                "dataset_hash": "d" * 64,
+                "config_hash": "c" * 64,
+                "result_hash": "r" * 64,
+                "report_hash": "h" * 64,
+                "metrics_json": '{"trades_count": 0}',
+                "report_json": '{"metrics": {"trades_count": 0}}',
+                "started_at": datetime(2026, 6, 1, 3, 0, tzinfo=UTC),
+                "completed_at": datetime(2026, 6, 1, 3, 1, tzinfo=UTC),
+            },
+        )
+
+    command.upgrade(config, "head")
+
+    with engine.begin() as connection:
+        dataset_id = connection.execute(
+            sa.text("SELECT dataset_id FROM backtest_runs WHERE id = :id"),
+            {"id": existing_run_id},
+        ).scalar_one()
+        dataset_fk = connection.execute(
+            sa.text(
+                "SELECT conname FROM pg_constraint "
+                "WHERE conrelid = 'public.backtest_runs'::regclass "
+                "AND confrelid = 'public.datasets'::regclass "
+                "AND conname = 'fk_backtest_runs_dataset_id'"
+            )
+        ).scalar_one()
+
+    assert dataset_id is None
+    assert dataset_fk == "fk_backtest_runs_dataset_id"
+
+
+def test_dataset_service_and_api_read_registered_backtest_datasets(tmp_path: Path) -> None:
+    settings = require_postgres()
+    config = alembic_config(settings)
+    command.downgrade(config, "base")
+    command.upgrade(config, "head")
+
+    engine = create_db_engine(settings)
+    session_factory = create_session_factory(engine)
+    insert_candles(IngestionService(session_factory))
+    backtest_service = BacktestService(session_factory, reports_dir=tmp_path)
+    run = backtest_service.run_backtest(backtest_request())
+    second_run = backtest_service.run_backtest(backtest_request())
+    assert run.dataset_id is not None
+    assert second_run.dataset_id == run.dataset_id
+
+    ingestion_service = IngestionService(session_factory)
+    artifact = ingestion_service.persist_raw_artifact(
+        run_id=None,
+        archive=RawArchiveResult(
+            uri=str(tmp_path / "raw.parquet"),
+            checksum="a" * 64,
+            byte_size=10,
+            row_count=1,
+            schema_version="test-raw-v1",
+        ),
+    )
+    artifact_dataset = ingestion_service.persist_dataset(
+        name="binance:ETH/USDT:1m",
+        dataset_hash="e" * 64,
+        decision_time=datetime(2026, 6, 1, 1, 0, tzinfo=UTC),
+        artifact_id=artifact.id,
+    )
+
+    dataset_service = DatasetService(session_factory)
+    dataset = dataset_service.get_dataset(run.dataset_id)
+    artifact_backed_dataset = dataset_service.get_dataset(artifact_dataset.id)
+    datasets = dataset_service.list_datasets(limit=10)
+
+    assert dataset.id == run.dataset_id
+    assert dataset.dataset_hash == run.dataset_hash
+    assert dataset.artifact_id is None
+    assert dataset.backtest_run_count == 2
+    assert artifact_backed_dataset.artifact_id == artifact.id
+    assert artifact_backed_dataset.backtest_run_count == 0
+    assert {item.id for item in datasets} == {run.dataset_id, artifact_dataset.id}
+    with pytest.raises(DatasetNotFoundError):
+        dataset_service.get_dataset(artifact_dataset.id + 1)
+
+    app = create_app(
+        Settings(
+            APP_ENV="test",
+            DATABASE_URL=settings.DATABASE_URL,
+            REPORTS_DIR=str(tmp_path),
+        )
+    )
+    with TestClient(app) as client:
+        get_response = client.get(f"/datasets/{run.dataset_id}")
+        artifact_get_response = client.get(f"/datasets/{artifact_dataset.id}")
+        list_response = client.get("/datasets?limit=10")
+        missing_response = client.get(f"/datasets/{artifact_dataset.id + 1}")
+
+    assert get_response.status_code == 200
+    get_body = get_response.json()
+    assert get_body["id"] == run.dataset_id
+    assert get_body["dataset_hash"] == run.dataset_hash
+    assert get_body["artifact_id"] is None
+    assert get_body["backtest_run_count"] == 2
+    assert artifact_get_response.status_code == 200
+    assert artifact_get_response.json()["artifact_id"] == artifact.id
+    assert list_response.status_code == 200
+    assert {item["id"] for item in list_response.json()["datasets"]} == {
+        run.dataset_id,
+        artifact_dataset.id,
+    }
+    assert missing_response.status_code == 404
