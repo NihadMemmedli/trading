@@ -102,6 +102,32 @@ def test_accepts_valid_agent_report_flat_proposal_long_proposal_and_risk_decisio
     assert risk_decision.decision == "reject"
 
 
+def test_trade_proposal_source_is_stripped_and_rejects_blank_after_stripping() -> None:
+    payload = valid_long_proposal_payload()
+    payload["source"] = "  trader_research  "
+
+    proposal = TradeProposalPayload.model_validate(payload)
+
+    assert proposal.source == "trader_research"
+
+    payload["source"] = "   "
+
+    with pytest.raises(ValidationError):
+        TradeProposalPayload.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "bad_value",
+    [float("nan"), float("inf"), float("-inf"), Decimal("NaN"), Decimal("Infinity")],
+)
+def test_risk_decision_metadata_rejects_non_finite_numbers(bad_value: object) -> None:
+    payload = valid_risk_decision_payload()
+    payload["metadata"] = {"policy_version": "2026-06-27", "score": bad_value}
+
+    with pytest.raises(ValidationError):
+        RiskDecisionPayload.model_validate(payload)
+
+
 @pytest.mark.parametrize(
     ("payload_factory", "field_name"),
     [

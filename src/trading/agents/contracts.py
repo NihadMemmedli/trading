@@ -202,7 +202,10 @@ class TradeProposalPayload(BaseModel):
     @field_validator("source")
     @classmethod
     def normalize_source(cls, value: str) -> str:
-        return value.strip()
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("source must be non-empty")
+        return stripped
 
     @field_validator("stop_loss", "max_position_risk_pct")
     @classmethod

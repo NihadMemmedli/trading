@@ -13,7 +13,7 @@ from trading.core.settings import Settings
 from trading.db.models import RiskDecision, TradeProposal
 from trading.db.session import create_db_engine, create_session_factory
 from trading.services.agent_signals import AgentSignalService, SignalValidationError
-from trading.services.risk_decisions import RiskDecisionService
+from trading.services.risk_decisions import RiskDecisionProposalStatusError, RiskDecisionService
 
 pytestmark = pytest.mark.integration
 
@@ -227,3 +227,35 @@ def test_ai_signal_migration_and_real_db_persistence() -> None:
     assert persisted_proposal.raw_json["entry"]["price"] == "61000"
     assert persisted_decision is not None
     assert persisted_decision.raw_json["metadata"] == {"policy_version": "2026-06-27"}
+
+
+@pytest.mark.parametrize("proposal_status", ["flat", "approved", "rejected", "reduced"])
+def test_risk_decision_rejects_non_pending_proposals(proposal_status: str) -> None:
+    settings = require_postgres()
+    command.upgrade(alembic_config(settings), "head")
+
+    engine = create_db_engine(settings)
+    session_factory = create_session_factory(engine)
+    signal_service = AgentSignalService(session_factory)
+    risk_service = RiskDecisionService(session_factory)
+
+    if proposal_status == "flat":
+        proposal = signal_service.create_trade_proposal(valid_flat_proposal_payload())
+    else:
+        proposal = signal_service.create_trade_proposal(valid_long_proposal_payload())
+        with session_factory() as session:
+            persisted_proposal = session.get(TradeProposal, proposal.id)
+            assert persisted_proposal is not None
+            persisted_proposal.status = proposal_status
+            session.commit()
+
+    with pytest.raises(RiskDecisionProposalStatusError) as exc_info:
+        risk_service.create_risk_decision(risk_decision_payload(str(proposal.id)))
+
+    assert str(exc_info.value) == (
+        f"risk decision requires pending_risk trade proposal; proposal status is {proposal_status}"
+    )
+    with session_factory() as session:
+        persisted_decision = session.get(RiskDecision, proposal.id)
+
+    assert persisted_decision is None

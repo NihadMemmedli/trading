@@ -11,7 +11,11 @@ from trading.apps.api.dependencies import RiskDecisionServiceDependency
 from trading.apps.api.schemas.risk import RiskDecisionListResponse, RiskDecisionResponse
 from trading.risk.contracts import RiskDecisionPayload
 from trading.services.agent_signals import SignalValidationError, TradeProposalNotFoundError
-from trading.services.risk_decisions import RiskDecisionConflictError, RiskDecisionNotFoundError
+from trading.services.risk_decisions import (
+    RiskDecisionConflictError,
+    RiskDecisionNotFoundError,
+    RiskDecisionProposalStatusError,
+)
 
 router = APIRouter(prefix="/risk", tags=["risk"])
 
@@ -41,6 +45,11 @@ def create_risk_decision(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="risk decision already exists",
+        ) from exc
+    except RiskDecisionProposalStatusError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
         ) from exc
     return RiskDecisionResponse.from_decision(decision)
 

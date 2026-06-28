@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, HTTPException, Query, status
 
@@ -16,6 +16,8 @@ from trading.apps.api.schemas.agent_signals import (
 from trading.services.agent_signals import SignalValidationError, TradeProposalNotFoundError
 
 router = APIRouter(prefix="/trade-proposals", tags=["trade-proposals"])
+
+TradeProposalStatusFilter = Literal["pending_risk", "flat", "approved", "rejected", "reduced"]
 
 
 @router.post("", response_model=TradeProposalResponse, status_code=status.HTTP_201_CREATED)
@@ -51,7 +53,7 @@ def get_trade_proposal(
 @router.get("", response_model=TradeProposalListResponse)
 def list_trade_proposals(
     service: AgentSignalServiceDependency,
-    status_filter: Annotated[str | None, Query(alias="status")] = None,
+    status_filter: Annotated[TradeProposalStatusFilter | None, Query(alias="status")] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
 ) -> TradeProposalListResponse:
     proposals = [

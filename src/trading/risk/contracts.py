@@ -6,6 +6,7 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
+from math import isfinite
 from typing import Any, Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -61,6 +62,14 @@ class RiskDecisionPayload(BaseModel):
                 raise ValueError("list entries must be non-empty")
             normalized.append(stripped)
         return normalized
+
+    @field_validator("metadata")
+    @classmethod
+    def validate_metadata(cls, value: dict[str, JsonScalar]) -> dict[str, JsonScalar]:
+        for key, metadata_value in value.items():
+            if isinstance(metadata_value, float) and not isfinite(metadata_value):
+                raise ValueError(f"metadata numeric value must be finite: {key}")
+        return value
 
     def payload_json(self) -> dict[str, Any]:
         dumped = self.model_dump(mode="json")

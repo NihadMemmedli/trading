@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
 
+import pytest
 from fastapi.testclient import TestClient
 
 from trading.apps.api import create_app
@@ -15,7 +16,10 @@ from trading.services.agent_signals import (
     SignalValidationError,
     TradeProposalNotFoundError,
 )
-from trading.services.risk_decisions import RiskDecisionConflictError, RiskDecisionNotFoundError
+from trading.services.risk_decisions import (
+    RiskDecisionConflictError,
+    RiskDecisionNotFoundError,
+)
 
 
 class FakeAgentSignalService:
@@ -25,6 +29,7 @@ class FakeAgentSignalService:
         self.created = datetime(2026, 6, 27, 12, 2, tzinfo=UTC)
         self.report_payloads: list[object] = []
         self.proposal_payloads: list[object] = []
+        self.proposal_list_filters: list[str | None] = []
 
     def _report(self, **overrides: object) -> SimpleNamespace:
         defaults = {
@@ -99,6 +104,7 @@ class FakeAgentSignalService:
         status: str | None = None,
         limit: int = 50,
     ) -> list[SimpleNamespace]:
+        self.proposal_list_filters.append(status)
         return [self._proposal(status=status or "pending_risk")][:limit]
 
 
@@ -270,6 +276,31 @@ def test_trade_proposal_create_get_list_and_validation_mapping() -> None:
     assert malformed.status_code == 422
     assert service_rejected.status_code == 422
     assert len(service.proposal_payloads) == 2
+
+
+@pytest.mark.parametrize(
+    "status_filter",
+    ["pending_risk", "flat", "approved", "rejected", "reduced"],
+)
+def test_trade_proposal_list_accepts_known_status_filters(status_filter: str) -> None:
+    service = FakeAgentSignalService()
+
+    with client_with_fake_services(signal_service=service) as client:
+        response = client.get(f"/trade-proposals?status={status_filter}")
+
+    assert response.status_code == 200
+    assert response.json()["proposals"][0]["status"] == status_filter
+    assert service.proposal_list_filters == [status_filter]
+
+
+def test_trade_proposal_list_rejects_unknown_status_filter() -> None:
+    service = FakeAgentSignalService()
+
+    with client_with_fake_services(signal_service=service) as client:
+        response = client.get("/trade-proposals?status=unknown")
+
+    assert response.status_code == 422
+    assert service.proposal_list_filters == []
 
 
 def test_risk_decision_create_get_list_and_error_mapping() -> None:

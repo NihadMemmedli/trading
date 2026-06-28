@@ -24,6 +24,10 @@ class RiskDecisionConflictError(ValueError):
     """Raised when a proposal already has a risk decision."""
 
 
+class RiskDecisionProposalStatusError(ValueError):
+    """Raised when a proposal is not awaiting a risk decision."""
+
+
 class RiskDecisionService:
     """Stores deterministic risk decisions for validated trade proposals."""
 
@@ -43,6 +47,11 @@ class RiskDecisionService:
             existing = session.get(RiskDecision, decision_payload.proposal_id)
             if existing is not None:
                 raise RiskDecisionConflictError(str(decision_payload.proposal_id))
+            if proposal.status != "pending_risk":
+                raise RiskDecisionProposalStatusError(
+                    "risk decision requires pending_risk trade proposal; "
+                    f"proposal status is {proposal.status}"
+                )
 
             decision = RiskDecision(
                 proposal_id=decision_payload.proposal_id,
