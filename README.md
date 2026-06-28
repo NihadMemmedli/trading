@@ -76,12 +76,15 @@ curl -sS -X POST http://localhost:8000/backtests/runs \
 ```
 
 `POST /backtests/runs` and `GET /backtests/runs/{run_id}` return full run details, including
-the reproducible report JSON, persisted trades, and persisted equity curve:
+the dataset lineage id and hash, reproducible report JSON, persisted trades, and persisted equity
+curve:
 
 ```json
 {
   "id": "00000000-0000-4000-8000-000000000011",
   "status": "succeeded",
+  "dataset_id": 42,
+  "dataset_hash": "dddd...",
   "metrics": {"trades_count": 1, "final_equity": "1001"},
   "report": {"report_hash": "...", "metrics": {"trades_count": 1}},
   "trades": [
@@ -108,7 +111,9 @@ the reproducible report JSON, persisted trades, and persisted equity curve:
 
 Use `GET /backtests/runs?limit=50` for a lightweight run list. List responses intentionally omit
 `report`, `trades`, and `equity_curve`; fetch a specific run when those artifacts are needed.
-Historical succeeded runs created before artifact persistence may return empty artifact arrays.
+They still include `dataset_id` and `dataset_hash` when lineage is available. Historical succeeded
+runs created before artifact or dataset lineage persistence may return empty artifact arrays or
+`dataset_id: null`.
 
 ## Configuration
 

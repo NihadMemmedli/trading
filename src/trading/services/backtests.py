@@ -42,6 +42,7 @@ from trading.db.models import (
     BacktestRun,
     BacktestTrade,
     Candle,
+    Dataset,
     Exchange,
     TradingPair,
 )
@@ -303,6 +304,14 @@ class BacktestService:
         equity_curve: tuple[EngineEquityPoint, ...],
     ) -> BacktestRun:
         with session_scope(self._session_factory) as session:
+            dataset_id = None
+            if dataset_hash is not None:
+                dataset_id = _get_or_create_backtest_dataset(
+                    session,
+                    request=request,
+                    dataset_hash=dataset_hash,
+                ).id
+
             run = BacktestRun(
                 status=status.value,
                 exchange=request.exchange,
@@ -317,6 +326,7 @@ class BacktestService:
                 slippage_bps=request.slippage_bps,
                 strategy_name=request.strategy_name,
                 strategy_parameters=dict(request.strategy_parameters),
+                dataset_id=dataset_id,
                 dataset_hash=dataset_hash,
                 config_hash=config_hash,
                 result_hash=result_hash,
@@ -362,6 +372,37 @@ class BacktestService:
             ).scalar_one()
             session.expunge_all()
             return loaded_run
+
+
+def _get_or_create_backtest_dataset(
+    session: Session,
+    *,
+    request: NormalizedBacktestRunRequest,
+    dataset_hash: str,
+) -> Dataset:
+    name = deterministic_backtest_dataset_name(request)
+    existing = session.execute(
+        select(Dataset).where(Dataset.name == name, Dataset.dataset_hash == dataset_hash)
+    ).scalar_one_or_none()
+    if existing is not None:
+        return existing
+
+    dataset = Dataset(
+        name=name,
+        dataset_hash=dataset_hash,
+        decision_time=request.decision_time,
+        artifact_id=None,
+    )
+    session.add(dataset)
+    session.flush()
+    return dataset
+
+
+def deterministic_backtest_dataset_name(request: NormalizedBacktestRunRequest) -> str:
+    return (
+        f"backtest:{request.exchange}:{request.symbol}:{request.timeframe}:"
+        f"{_utc_iso(request.start)}:{_utc_iso(request.end)}:{_utc_iso(request.decision_time)}"
+    )
 
 
 def build_backtest_strategy(
@@ -455,3 +496,7 @@ def _json_default(value: object) -> str:
     if isinstance(value, datetime):
         return value.isoformat()
     raise TypeError(f"unsupported JSON value: {type(value).__name__}")
+
+
+def _utc_iso(value: datetime) -> str:
+    return value.isoformat().replace("+00:00", "Z")

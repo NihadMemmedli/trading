@@ -15,9 +15,15 @@ from trading.backtesting import BacktestRunStatus
 from trading.core.settings import Settings
 from trading.data.market import RawOhlcvBatch
 from trading.data.quality import normalize_ohlcv_batch
-from trading.db.models import BacktestEquityPoint, BacktestRun, BacktestTrade
+from trading.db.models import BacktestEquityPoint, BacktestRun, BacktestTrade, Dataset
 from trading.db.session import create_db_engine, create_session_factory
-from trading.services.backtests import BacktestRunRequest, BacktestService
+from trading.services.backtests import (
+    BacktestRunRequest,
+    BacktestService,
+    _normalize_request,
+    deterministic_backtest_dataset_name,
+    deterministic_candle_dataset_hash,
+)
 from trading.services.ingestion import IngestionService
 
 pytestmark = pytest.mark.integration
@@ -128,6 +134,29 @@ def test_backtest_runs_migration_and_real_db_persistence(tmp_path: Path) -> None
                 "AND indexname = 'ix_backtest_equity_points_run_id_timestamp'"
             )
         ).scalar_one()
+        dataset_id_column = connection.execute(
+            sa.text(
+                "SELECT data_type FROM information_schema.columns "
+                "WHERE table_schema = 'public' "
+                "AND table_name = 'backtest_runs' "
+                "AND column_name = 'dataset_id'"
+            )
+        ).scalar_one()
+        dataset_fk = connection.execute(
+            sa.text(
+                "SELECT conname FROM pg_constraint "
+                "WHERE conrelid = 'public.backtest_runs'::regclass "
+                "AND confrelid = 'public.datasets'::regclass "
+                "AND conname = 'fk_backtest_runs_dataset_id'"
+            )
+        ).scalar_one()
+        dataset_index = connection.execute(
+            sa.text(
+                "SELECT indexname FROM pg_indexes "
+                "WHERE tablename = 'backtest_runs' "
+                "AND indexname = 'ix_backtest_runs_dataset_id'"
+            )
+        ).scalar_one()
 
     assert table_name == "backtest_runs"
     assert trades_table_name == "backtest_trades"
@@ -135,6 +164,9 @@ def test_backtest_runs_migration_and_real_db_persistence(tmp_path: Path) -> None
     assert status_index == "ix_backtest_runs_status_created_at"
     assert trades_index == "ix_backtest_trades_run_id_timestamp"
     assert equity_index == "ix_backtest_equity_points_run_id_timestamp"
+    assert dataset_id_column == "bigint"
+    assert dataset_fk == "fk_backtest_runs_dataset_id"
+    assert dataset_index == "ix_backtest_runs_dataset_id"
 
     session_factory = create_session_factory(engine)
     insert_candles(IngestionService(session_factory))
@@ -147,7 +179,12 @@ def test_backtest_runs_migration_and_real_db_persistence(tmp_path: Path) -> None
     listed = service.list_runs(limit=10)
 
     assert first.status == BacktestRunStatus.SUCCEEDED.value
+    assert first.dataset_id is not None
+    assert second.dataset_id == first.dataset_id
     assert first.dataset_hash is not None
+    assert first.dataset_hash == deterministic_candle_dataset_hash(
+        service._load_candles(_normalize_request(request))
+    )
     assert first.config_hash is not None
     assert first.result_hash is not None
     assert first.report_hash is not None
@@ -188,12 +225,15 @@ def test_backtest_runs_migration_and_real_db_persistence(tmp_path: Path) -> None
     )
 
     assert failed.status == BacktestRunStatus.FAILED.value
+    assert failed.dataset_id is None
     assert failed.error_message is not None
     assert "eligible candle" in failed.error_message
     assert failed.trades == []
     assert failed.equity_points == []
 
     with session_factory() as session:
+        dataset_count = session.scalar(sa.select(sa.func.count()).select_from(Dataset))
+        dataset = session.get(Dataset, first.dataset_id)
         failed_trade_count = session.scalar(
             sa.select(sa.func.count())
             .select_from(BacktestTrade)
@@ -233,9 +273,15 @@ def test_backtest_runs_migration_and_real_db_persistence(tmp_path: Path) -> None
         session.commit()
         historical_run_id = historical_run.id
 
+    assert dataset_count == 1
+    assert dataset is not None
+    assert dataset.name == deterministic_backtest_dataset_name(_normalize_request(request))
+    assert dataset.dataset_hash == first.dataset_hash
+    assert dataset.decision_time == request.decision_time
     assert failed_trade_count == 0
     assert failed_equity_count == 0
 
     historical_retrieved = service.get_run(historical_run_id)
+    assert historical_retrieved.dataset_id is None
     assert historical_retrieved.trades == []
     assert historical_retrieved.equity_points == []

@@ -114,6 +114,7 @@ class BacktestRunSummaryResponse(BaseModel):
     slippage_bps: Decimal
     strategy_name: str
     strategy_parameters: dict[str, Any]
+    dataset_id: int | None
     dataset_hash: str | None
     config_hash: str | None
     result_hash: str | None
@@ -143,6 +144,7 @@ class BacktestRunSummaryResponse(BaseModel):
             slippage_bps=run.slippage_bps,
             strategy_name=run.strategy_name,
             strategy_parameters=run.strategy_parameters,
+            dataset_id=run.dataset_id,
             dataset_hash=run.dataset_hash,
             config_hash=run.config_hash,
             result_hash=run.result_hash,

@@ -34,6 +34,7 @@ class FakeBacktestService:
             "slippage_bps": Decimal("2"),
             "strategy_name": "moving_average_crossover",
             "strategy_parameters": {"short_window": 1, "long_window": 2},
+            "dataset_id": 42,
             "dataset_hash": "d" * 64,
             "config_hash": "c" * 64,
             "result_hash": "r" * 64,
@@ -131,6 +132,8 @@ def test_create_backtest_run_returns_persisted_response() -> None:
     assert body["exchange"] == "binance"
     assert body["symbol"] == "BTC/USDT"
     assert body["strategy_parameters"] == {"short_window": 1, "long_window": 2}
+    assert body["dataset_id"] == 42
+    assert body["dataset_hash"] == "d" * 64
     assert body["metrics"] == {"trades_count": 1, "final_equity": "1001"}
     assert body["report"] == {
         "report_hash": "a" * 64,
@@ -166,6 +169,8 @@ def test_get_backtest_run_returns_expanded_details_and_list_stays_summary_only()
 
     assert get_response.status_code == 200
     get_body = get_response.json()
+    assert get_body["dataset_id"] == 42
+    assert get_body["dataset_hash"] == "d" * 64
     assert get_body["report"]["report_hash"] == "a" * 64
     assert get_body["trades"][0]["timestamp"] == "2026-01-01T00:01:00Z"
     assert get_body["equity_curve"][0]["timestamp"] == "2026-01-01T00:00:00Z"
@@ -173,6 +178,8 @@ def test_get_backtest_run_returns_expanded_details_and_list_stays_summary_only()
     assert list_response.status_code == 200
     list_body = list_response.json()
     assert len(list_body["runs"]) == 1
+    assert list_body["runs"][0]["dataset_id"] == 42
+    assert list_body["runs"][0]["dataset_hash"] == "d" * 64
     assert "report" not in list_body["runs"][0]
     assert "trades" not in list_body["runs"][0]
     assert "equity_curve" not in list_body["runs"][0]
@@ -181,12 +188,16 @@ def test_get_backtest_run_returns_expanded_details_and_list_stays_summary_only()
 def test_backtest_request_rejects_order_like_fields_and_non_utc_generated_at() -> None:
     order_payload = valid_payload()
     order_payload["side"] = "buy"
+    dataset_payload = valid_payload()
+    dataset_payload["dataset_id"] = 42
     non_utc_payload = valid_payload()
     non_utc_payload["generated_at"] = "2026-01-02T04:00:00+04:00"
 
     with client_with_fake_service() as client:
         order_like_response = client.post("/backtests/runs", json=order_payload)
+        dataset_response = client.post("/backtests/runs", json=dataset_payload)
         non_utc_response = client.post("/backtests/runs", json=non_utc_payload)
 
     assert order_like_response.status_code == 422
+    assert dataset_response.status_code == 422
     assert non_utc_response.status_code == 422
