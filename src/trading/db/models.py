@@ -105,6 +105,46 @@ class IngestionRun(Base):
     artifacts: Mapped[list[RawArtifact]] = relationship(back_populates="run")
 
 
+class BacktestRun(Base):
+    __tablename__ = "backtest_runs"
+    __table_args__ = (
+        CheckConstraint("status IN ('succeeded', 'failed')", name="backtest_run_status_valid"),
+        Index("ix_backtest_runs_status_created_at", "status", "created_at"),
+        Index("ix_backtest_runs_exchange_symbol_timeframe", "exchange", "symbol", "timeframe"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    exchange: Mapped[str] = mapped_column(String(64), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(64), nullable=False)
+    timeframe: Mapped[str] = mapped_column(String(16), nullable=False)
+    start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    decision_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    initial_capital: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    fee_bps: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    slippage_bps: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    strategy_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    strategy_parameters: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    dataset_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    config_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    result_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    report_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    metrics_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    report_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    artifact_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    completed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
 class RawArtifact(Base):
     __tablename__ = "raw_artifacts"
     __table_args__ = (Index("ix_raw_artifacts_run_id", "run_id"),)

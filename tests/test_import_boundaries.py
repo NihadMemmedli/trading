@@ -106,10 +106,15 @@ def test_provider_registry_metadata_exposes_no_execution_or_private_credentials(
 
 
 def test_backtesting_and_strategy_modules_import_no_execution_or_private_runtime() -> None:
-    source_roots = (Path("src/trading/backtesting"), Path("src/trading/strategies"))
+    source_roots = (
+        Path("src/trading/apps/api"),
+        Path("src/trading/backtesting"),
+        Path("src/trading/services"),
+        Path("src/trading/strategies"),
+    )
     imported_modules: list[str] = []
     for source_root in source_roots:
-        for path in source_root.glob("*.py"):
+        for path in source_root.rglob("*.py"):
             tree = ast.parse(path.read_text(encoding="utf-8"))
             for node in ast.walk(tree):
                 if isinstance(node, ast.Import):

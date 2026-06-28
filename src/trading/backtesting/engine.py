@@ -7,6 +7,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
+from enum import StrEnum
 from typing import Any
 
 from trading.data.market import (
@@ -19,6 +20,13 @@ from trading.data.market import (
 from trading.strategies import CandleStrategy, StrategyParameters
 
 BPS_DENOMINATOR = Decimal("10000")
+
+
+class BacktestRunStatus(StrEnum):
+    """Terminal status for synchronous persisted backtest runs."""
+
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
 
 
 @dataclass(frozen=True)
