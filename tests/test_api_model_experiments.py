@@ -24,6 +24,7 @@ class FakeModelExperimentService:
         self.experiment_id = uuid.UUID("11111111-1111-1111-1111-111111111111")
         self.split_requests: list[object] = []
         self.experiment_requests: list[object] = []
+        self.baseline_requests: list[object] = []
 
     def _window(self) -> SimpleNamespace:
         return SimpleNamespace(
@@ -110,6 +111,28 @@ class FakeModelExperimentService:
         status = request.status
         return self._experiment(status=status)
 
+    def evaluate_baseline_model(self, request: Any) -> SimpleNamespace:
+        self.baseline_requests.append(request)
+        if request.dataset_id == 404:
+            raise ModelExperimentLineageError("dataset not found")
+        if request.dataset_id == 422:
+            raise ModelExperimentLineageError("feature set dataset_id mismatch")
+        if request.split_definition_id == 404:
+            raise SplitDefinitionNotFoundError(str(request.split_definition_id))
+        if request.split_definition_id == 422:
+            raise SplitValidationError("test window 0 has no baseline observations")
+        return self._experiment(
+            name=request.name,
+            model_name=request.baseline_name,
+            code_version=request.code_version,
+            parameters={
+                "baseline": {"name": request.baseline_name},
+                "parameters": request.parameters,
+            },
+            metrics={"overall": {"observations": 3, "accuracy": 1.0}},
+            status="succeeded",
+        )
+
     def get_model_experiment(self, experiment_id: uuid.UUID) -> SimpleNamespace:
         if experiment_id != self.experiment_id:
             raise ModelExperimentNotFoundError(str(experiment_id))
@@ -190,6 +213,16 @@ def experiment_payload() -> dict[str, object]:
     }
 
 
+def baseline_evaluation_payload() -> dict[str, object]:
+    return {
+        "dataset_id": 11,
+        "feature_set_id": 12,
+        "split_definition_id": 42,
+        "name": "previous-return-holdout",
+        "parameters": {"note": "api-test"},
+    }
+
+
 def test_create_get_and_list_split_definitions() -> None:
     service = FakeModelExperimentService()
 
@@ -239,6 +272,41 @@ def test_create_get_and_list_model_experiments() -> None:
     assert listed.status_code == 200
     assert len(listed.json()["model_experiments"]) == 1
     assert service.experiment_requests
+
+
+def test_create_baseline_evaluation() -> None:
+    service = FakeModelExperimentService()
+
+    with client_with_fake_service(service) as client:
+        created = client.post("/modeling/evaluations/baseline", json=baseline_evaluation_payload())
+
+    assert created.status_code == 200
+    assert created.json()["status"] == "succeeded"
+    assert created.json()["model_name"] == "previous_return_direction"
+    assert created.json()["metrics"]["overall"]["observations"] == 3
+    assert service.baseline_requests
+    assert service.baseline_requests[0].code_version == "baseline_evaluator_v1"
+
+
+def test_baseline_evaluation_route_maps_errors() -> None:
+    missing_payload = baseline_evaluation_payload()
+    missing_payload["dataset_id"] = 404
+    bad_lineage_payload = baseline_evaluation_payload()
+    bad_lineage_payload["dataset_id"] = 422
+    insufficient_payload = baseline_evaluation_payload()
+    insufficient_payload["split_definition_id"] = 422
+
+    with client_with_fake_service() as client:
+        missing = client.post("/modeling/evaluations/baseline", json=missing_payload)
+        bad_lineage = client.post("/modeling/evaluations/baseline", json=bad_lineage_payload)
+        insufficient = client.post("/modeling/evaluations/baseline", json=insufficient_payload)
+
+    assert missing.status_code == 404
+    assert missing.json() == {"detail": "dataset not found"}
+    assert bad_lineage.status_code == 422
+    assert bad_lineage.json() == {"detail": "feature set dataset_id mismatch"}
+    assert insufficient.status_code == 422
+    assert insufficient.json() == {"detail": "test window 0 has no baseline observations"}
 
 
 def test_model_experiment_routes_map_errors_and_validate_bounds() -> None:

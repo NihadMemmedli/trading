@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException, Path, Query, status
 
 from trading.apps.api.dependencies import ModelExperimentServiceDependency
 from trading.apps.api.schemas.model_experiments import (
+    BaselineEvaluationRequest,
     ModelExperimentCreateRequest,
     ModelExperimentListResponse,
     ModelExperimentResponse,
@@ -83,6 +84,28 @@ def create_model_experiment(
 ) -> ModelExperimentResponse:
     try:
         experiment = service.create_model_experiment(payload.to_service_request())
+    except SplitDefinitionNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="split definition not found",
+        ) from exc
+    except ModelExperimentLineageError as exc:
+        _raise_lineage_http_error(exc)
+    except SplitValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return ModelExperimentResponse.model_validate(experiment)
+
+
+@router.post("/evaluations/baseline", response_model=ModelExperimentResponse)
+def evaluate_baseline_model(
+    payload: BaselineEvaluationRequest,
+    service: ModelExperimentServiceDependency,
+) -> ModelExperimentResponse:
+    try:
+        experiment = service.evaluate_baseline_model(payload.to_service_request())
     except SplitDefinitionNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

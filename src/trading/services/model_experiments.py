@@ -7,7 +7,8 @@ import json
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
 from typing import Any, cast
 
 from sqlalchemy import Select, func, select
@@ -27,6 +28,8 @@ from trading.db.session import session_scope
 SPLIT_NAMES = ("train", "validation", "test")
 SPLIT_TYPES = ("holdout", "walk_forward")
 EXPERIMENT_STATUSES = ("created", "running", "succeeded", "failed")
+DEFAULT_BASELINE_NAME = "previous_return_direction"
+BASELINE_RETURN_FEATURE = "close_return_1"
 
 
 class SplitDefinitionNotFoundError(LookupError):
@@ -80,6 +83,17 @@ class ModelExperimentCreateRequest:
 
 
 @dataclass(frozen=True)
+class BaselineEvaluationRequest:
+    dataset_id: int
+    feature_set_id: int
+    split_definition_id: int
+    name: str
+    baseline_name: str = DEFAULT_BASELINE_NAME
+    code_version: str = "baseline_evaluator_v1"
+    parameters: Mapping[str, Any] | None = None
+
+
+@dataclass(frozen=True)
 class SplitWindowRecord:
     id: int
     window_index: int
@@ -129,6 +143,52 @@ class NormalizedSplitWindow:
     start: datetime
     end: datetime
     decision_time: datetime
+
+
+@dataclass(frozen=True)
+class BaselineFeatureRow:
+    id: int
+    pair_id: int
+    timeframe: str
+    timestamp: datetime
+    features: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class BaselineEvaluationWindow:
+    window_index: int
+    split_name: str
+    start: datetime
+    end: datetime
+    decision_time: datetime
+    rows: Sequence[BaselineFeatureRow]
+
+
+@dataclass
+class BaselineMetricCounts:
+    observations: int = 0
+    true_positives: int = 0
+    false_positives: int = 0
+    true_negatives: int = 0
+    false_negatives: int = 0
+
+    def add(self, *, predicted_positive: bool, target_positive: bool) -> None:
+        self.observations += 1
+        if predicted_positive and target_positive:
+            self.true_positives += 1
+        elif predicted_positive and not target_positive:
+            self.false_positives += 1
+        elif not predicted_positive and target_positive:
+            self.false_negatives += 1
+        else:
+            self.true_negatives += 1
+
+    def extend(self, other: BaselineMetricCounts) -> None:
+        self.observations += other.observations
+        self.true_positives += other.true_positives
+        self.false_positives += other.false_positives
+        self.true_negatives += other.true_negatives
+        self.false_negatives += other.false_negatives
 
 
 class ModelExperimentService:
@@ -279,6 +339,73 @@ class ModelExperimentService:
                 parameters_json=parameters,
                 metrics_json=metrics,
                 status=status,
+                started_at=started_at,
+                completed_at=completed_at,
+            )
+            session.add(experiment)
+            session.flush()
+            session.refresh(experiment)
+            return _experiment_record_from_model(experiment)
+
+    def evaluate_baseline_model(
+        self,
+        request: BaselineEvaluationRequest,
+    ) -> ModelExperimentRecord:
+        name = _normalize_name(request.name, field_name="experiment name")
+        baseline_name = _normalize_name(request.baseline_name, field_name="baseline_name")
+        if baseline_name != DEFAULT_BASELINE_NAME:
+            raise SplitValidationError(f"baseline_name must be {DEFAULT_BASELINE_NAME}")
+        code_version = _normalize_name(request.code_version, field_name="code_version", max_len=64)
+        user_parameters = _json_copy(dict(request.parameters or {}), field_name="parameters")
+        started_at = datetime.now(UTC)
+
+        with session_scope(self._session_factory) as session:
+            self._validate_lineage(session, request.dataset_id, request.feature_set_id)
+            split_definition = _load_split_definition(session, request.split_definition_id)
+            if split_definition.dataset_id != request.dataset_id:
+                raise ModelExperimentLineageError("split definition dataset_id mismatch")
+            if split_definition.feature_set_id != request.feature_set_id:
+                raise ModelExperimentLineageError("split definition feature_set_id mismatch")
+
+            windows = _normalized_windows_from_model(split_definition)
+            self._validate_feature_windows(session, request.feature_set_id, windows)
+            evaluation_windows = _load_baseline_evaluation_windows(
+                session,
+                feature_set_id=request.feature_set_id,
+                windows=windows,
+            )
+            metrics = evaluate_previous_return_direction_baseline(evaluation_windows)
+            parameters = _baseline_parameters(
+                baseline_name=baseline_name,
+                user_parameters=user_parameters,
+                split_definition=split_definition,
+            )
+            completed_at = datetime.now(UTC)
+            parameter_hash = deterministic_model_parameter_hash(parameters)
+            experiment_hash = deterministic_experiment_hash(
+                dataset_id=request.dataset_id,
+                feature_set_id=request.feature_set_id,
+                split_definition_id=request.split_definition_id,
+                split_hash=split_definition.split_hash,
+                name=name,
+                model_name=baseline_name,
+                code_version=code_version,
+                parameters=parameters,
+                metrics=metrics,
+                status="succeeded",
+            )
+            experiment = ModelExperiment(
+                dataset_id=request.dataset_id,
+                feature_set_id=request.feature_set_id,
+                split_definition_id=request.split_definition_id,
+                name=name,
+                model_name=baseline_name,
+                parameter_hash=parameter_hash,
+                experiment_hash=experiment_hash,
+                code_version=code_version,
+                parameters_json=parameters,
+                metrics_json=metrics,
+                status="succeeded",
                 started_at=started_at,
                 completed_at=completed_at,
             )
@@ -439,6 +566,45 @@ def deterministic_experiment_hash(
     )
 
 
+def evaluate_previous_return_direction_baseline(
+    windows: Sequence[BaselineEvaluationWindow],
+) -> dict[str, Any]:
+    if not windows:
+        raise SplitValidationError("at least one evaluation window is required")
+
+    overall = BaselineMetricCounts()
+    by_split = {split_name: BaselineMetricCounts() for split_name in SPLIT_NAMES}
+    window_metrics: list[dict[str, Any]] = []
+
+    for window in windows:
+        window_counts = _evaluate_baseline_window(window)
+        if window_counts.observations == 0:
+            raise SplitValidationError(
+                f"{window.split_name} window {window.window_index} has no baseline observations"
+            )
+        overall.extend(window_counts)
+        by_split[window.split_name].extend(window_counts)
+        window_metrics.append(
+            {
+                "window_index": window.window_index,
+                "split_name": window.split_name,
+                "metrics": _metric_counts_json(window_counts),
+            }
+        )
+
+    for split_name, split_counts in by_split.items():
+        if split_counts.observations == 0:
+            raise SplitValidationError(f"{split_name} split has no baseline observations")
+
+    return {
+        "overall": _metric_counts_json(overall),
+        "by_split": {
+            split_name: _metric_counts_json(by_split[split_name]) for split_name in SPLIT_NAMES
+        },
+        "windows": window_metrics,
+    }
+
+
 def _find_existing_split_definition(
     session: Session,
     *,
@@ -468,6 +634,51 @@ def _load_split_definition(session: Session, split_definition_id: int) -> SplitD
     if split_definition is None:
         raise SplitDefinitionNotFoundError(str(split_definition_id))
     return split_definition
+
+
+def _load_baseline_evaluation_windows(
+    session: Session,
+    *,
+    feature_set_id: int,
+    windows: Sequence[NormalizedSplitWindow],
+) -> tuple[BaselineEvaluationWindow, ...]:
+    evaluation_windows: list[BaselineEvaluationWindow] = []
+    for window in windows:
+        rows = session.execute(
+            select(FeatureRow)
+            .where(
+                FeatureRow.feature_set_id == feature_set_id,
+                FeatureRow.timestamp >= window.start,
+                FeatureRow.timestamp <= window.end,
+                FeatureRow.available_at <= window.decision_time,
+            )
+            .order_by(
+                FeatureRow.pair_id,
+                FeatureRow.timeframe,
+                FeatureRow.timestamp,
+                FeatureRow.id,
+            )
+        ).scalars()
+        evaluation_windows.append(
+            BaselineEvaluationWindow(
+                window_index=window.window_index,
+                split_name=window.split_name,
+                start=window.start,
+                end=window.end,
+                decision_time=window.decision_time,
+                rows=tuple(
+                    BaselineFeatureRow(
+                        id=row.id,
+                        pair_id=row.pair_id,
+                        timeframe=row.timeframe,
+                        timestamp=row.timestamp,
+                        features=dict(row.features_json),
+                    )
+                    for row in rows
+                ),
+            )
+        )
+    return tuple(evaluation_windows)
 
 
 def _feature_row_count(
@@ -529,6 +740,97 @@ def _normalize_windows(
     if duplicates:
         raise SplitValidationError("duplicate split window index/name")
     return tuple(sorted(normalized, key=lambda item: (item.window_index, item.split_name)))
+
+
+def _evaluate_baseline_window(window: BaselineEvaluationWindow) -> BaselineMetricCounts:
+    counts = BaselineMetricCounts()
+    grouped_rows: dict[tuple[int, str], list[BaselineFeatureRow]] = {}
+    for row in window.rows:
+        grouped_rows.setdefault((row.pair_id, row.timeframe), []).append(row)
+
+    for rows in grouped_rows.values():
+        previous_return: Decimal | None = None
+        for row in sorted(rows, key=lambda item: (item.timestamp, item.id)):
+            current_return = _close_return_1(row)
+            if previous_return is None:
+                previous_return = current_return
+                continue
+            counts.add(
+                predicted_positive=previous_return > 0,
+                target_positive=current_return > 0,
+            )
+            previous_return = current_return
+    return counts
+
+
+def _close_return_1(row: BaselineFeatureRow) -> Decimal:
+    raw_value = row.features.get(BASELINE_RETURN_FEATURE)
+    if raw_value is None or isinstance(raw_value, bool):
+        raise SplitValidationError(f"feature row {row.id} is missing {BASELINE_RETURN_FEATURE}")
+    try:
+        value = Decimal(str(raw_value))
+    except (InvalidOperation, ValueError) as exc:
+        raise SplitValidationError(
+            f"feature row {row.id} has invalid {BASELINE_RETURN_FEATURE}"
+        ) from exc
+    if not value.is_finite():
+        raise SplitValidationError(f"feature row {row.id} has invalid {BASELINE_RETURN_FEATURE}")
+    return value
+
+
+def _metric_counts_json(counts: BaselineMetricCounts) -> dict[str, Any]:
+    correct = counts.true_positives + counts.true_negatives
+    predicted_positive = counts.true_positives + counts.false_positives
+    target_positive = counts.true_positives + counts.false_negatives
+    return {
+        "observations": counts.observations,
+        "accuracy": _ratio(correct, counts.observations),
+        "true_positives": counts.true_positives,
+        "false_positives": counts.false_positives,
+        "true_negatives": counts.true_negatives,
+        "false_negatives": counts.false_negatives,
+        "positive_prediction_rate": _ratio(predicted_positive, counts.observations),
+        "target_positive_rate": _ratio(target_positive, counts.observations),
+    }
+
+
+def _ratio(numerator: int, denominator: int) -> float:
+    if denominator == 0:
+        return 0.0
+    return round(numerator / denominator, 12)
+
+
+def _baseline_parameters(
+    *,
+    baseline_name: str,
+    user_parameters: Mapping[str, Any],
+    split_definition: SplitDefinition,
+) -> dict[str, Any]:
+    return _json_copy(
+        {
+            "baseline": {
+                "name": baseline_name,
+                "prediction_feature": BASELINE_RETURN_FEATURE,
+                "target_feature": BASELINE_RETURN_FEATURE,
+                "positive_threshold": "0",
+                "rule": (
+                    "predict current positive return when previous eligible row return is positive"
+                ),
+            },
+            "parameters": _json_copy(dict(user_parameters), field_name="parameters"),
+            "split_definition": {
+                "id": split_definition.id,
+                "name": split_definition.name,
+                "split_type": split_definition.split_type,
+                "split_hash": split_definition.split_hash,
+                "windows": [
+                    _window_json(window)
+                    for window in _normalized_windows_from_model(split_definition)
+                ],
+            },
+        },
+        field_name="baseline parameters",
+    )
 
 
 def _validate_window_shape(

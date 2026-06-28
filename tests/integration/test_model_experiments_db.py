@@ -20,6 +20,7 @@ from trading.services.backtests import deterministic_candle_dataset_hash
 from trading.services.feature_sets import FeatureSetCreateRequest, FeatureSetService
 from trading.services.ingestion import IngestionService
 from trading.services.model_experiments import (
+    BaselineEvaluationRequest,
     ModelExperimentCreateRequest,
     ModelExperimentService,
     SplitDefinitionCreateRequest,
@@ -81,6 +82,10 @@ def seed_feature_set(session_factory: sa.orm.sessionmaker[sa.orm.Session]) -> tu
             ["2026-06-01T00:02:00Z", "102", "102", "102", "102", "12"],
             ["2026-06-01T00:03:00Z", "103", "103", "103", "103", "13"],
             ["2026-06-01T00:04:00Z", "104", "104", "104", "104", "14"],
+            ["2026-06-01T00:05:00Z", "105", "105", "105", "105", "15"],
+            ["2026-06-01T00:06:00Z", "106", "106", "106", "106", "16"],
+            ["2026-06-01T00:07:00Z", "107", "107", "107", "107", "17"],
+            ["2026-06-01T00:08:00Z", "108", "108", "108", "108", "18"],
         ],
     )
     normalized = normalize_ohlcv_batch(
@@ -94,14 +99,14 @@ def seed_feature_set(session_factory: sa.orm.sessionmaker[sa.orm.Session]) -> tu
         symbol="BTC/USDT",
         timeframe="1m",
         start_time=datetime(2026, 6, 1, 0, 0, tzinfo=UTC),
-        end_time=datetime(2026, 6, 1, 0, 5, tzinfo=UTC),
+        end_time=datetime(2026, 6, 1, 0, 9, tzinfo=UTC),
         decision_time=datetime(2026, 6, 1, 1, tzinfo=UTC),
         source="binance",
     )
     dataset = ingestion.persist_dataset(
         name=(
             "backtest:binance:BTC/USDT:1m:"
-            "2026-06-01T00:00:00Z:2026-06-01T00:04:00Z:2026-06-01T01:00:00Z"
+            "2026-06-01T00:00:00Z:2026-06-01T00:08:00Z:2026-06-01T01:00:00Z"
         ),
         dataset_hash=deterministic_candle_dataset_hash(
             tuple(
@@ -165,6 +170,35 @@ def split_windows(
     )
 
 
+def baseline_split_windows(
+    *,
+    decision_time: datetime = datetime(2026, 6, 1, 1, tzinfo=UTC),
+) -> tuple[SplitWindowCreateRequest, ...]:
+    return (
+        SplitWindowCreateRequest(
+            window_index=0,
+            split_name="train",
+            start=datetime(2026, 6, 1, 0, 1, tzinfo=UTC),
+            end=datetime(2026, 6, 1, 0, 2, 30, tzinfo=UTC),
+            decision_time=decision_time,
+        ),
+        SplitWindowCreateRequest(
+            window_index=0,
+            split_name="validation",
+            start=datetime(2026, 6, 1, 0, 3, tzinfo=UTC),
+            end=datetime(2026, 6, 1, 0, 4, 30, tzinfo=UTC),
+            decision_time=decision_time,
+        ),
+        SplitWindowCreateRequest(
+            window_index=0,
+            split_name="test",
+            start=datetime(2026, 6, 1, 0, 5, tzinfo=UTC),
+            end=datetime(2026, 6, 1, 0, 6, 30, tzinfo=UTC),
+            decision_time=decision_time,
+        ),
+    )
+
+
 def split_payload(dataset_id: int, feature_set_id: int, *, name: str) -> dict[str, object]:
     return {
         "dataset_id": dataset_id,
@@ -181,6 +215,26 @@ def split_payload(dataset_id: int, feature_set_id: int, *, name: str) -> dict[st
                 "decision_time": window.decision_time.isoformat().replace("+00:00", "Z"),
             }
             for window in split_windows()
+        ],
+    }
+
+
+def baseline_split_payload(dataset_id: int, feature_set_id: int, *, name: str) -> dict[str, object]:
+    return {
+        "dataset_id": dataset_id,
+        "feature_set_id": feature_set_id,
+        "name": name,
+        "split_type": "holdout",
+        "config": {"purpose": "baseline-evaluation"},
+        "windows": [
+            {
+                "window_index": window.window_index,
+                "split_name": window.split_name,
+                "start": window.start.isoformat().replace("+00:00", "Z"),
+                "end": window.end.isoformat().replace("+00:00", "Z"),
+                "decision_time": window.decision_time.isoformat().replace("+00:00", "Z"),
+            }
+            for window in baseline_split_windows()
         ],
     }
 
@@ -226,6 +280,16 @@ def test_model_split_and_experiment_migration_service_and_api() -> None:
             config={},
         )
     )
+    baseline_split = service.create_split_definition(
+        SplitDefinitionCreateRequest(
+            dataset_id=dataset_id,
+            feature_set_id=feature_set_id,
+            name="baseline-holdout",
+            split_type="holdout",
+            windows=baseline_split_windows(),
+            config={"purpose": "baseline-evaluation"},
+        )
+    )
 
     assert repeated_split.id == split.id
     assert split.dataset_id == dataset_id
@@ -266,6 +330,28 @@ def test_model_split_and_experiment_migration_service_and_api() -> None:
     assert retrieved_experiment.experiment_hash == experiment.experiment_hash
     assert listed_experiments[0].id == experiment.id
     assert experiment.parameter_hash
+
+    baseline_experiment = service.evaluate_baseline_model(
+        BaselineEvaluationRequest(
+            dataset_id=dataset_id,
+            feature_set_id=feature_set_id,
+            split_definition_id=baseline_split.id,
+            name="service-previous-return",
+            parameters={"note": "integration"},
+        )
+    )
+    assert baseline_experiment.dataset_id == dataset_id
+    assert baseline_experiment.feature_set_id == feature_set_id
+    assert baseline_experiment.split_definition_id == baseline_split.id
+    assert baseline_experiment.model_name == "previous_return_direction"
+    assert baseline_experiment.status == "succeeded"
+    assert baseline_experiment.parameters["parameters"] == {"note": "integration"}
+    assert baseline_experiment.parameters["split_definition"]["split_hash"] == (
+        baseline_split.split_hash
+    )
+    assert baseline_experiment.metrics["overall"]["observations"] == 3
+    assert baseline_experiment.metrics["overall"]["accuracy"] == 1.0
+    assert baseline_experiment.metrics["by_split"]["train"]["observations"] == 1
 
     with engine.begin() as connection:
         split_table = connection.execute(
@@ -399,6 +485,24 @@ def test_model_split_and_experiment_migration_service_and_api() -> None:
         )
         assert create_experiment_response.status_code == 200
         api_experiment = create_experiment_response.json()
+        create_baseline_split_response = client.post(
+            "/modeling/splits",
+            json=baseline_split_payload(dataset_id, feature_set_id, name="api-baseline-holdout"),
+        )
+        assert create_baseline_split_response.status_code == 200
+        api_baseline_split = create_baseline_split_response.json()
+        create_baseline_response = client.post(
+            "/modeling/evaluations/baseline",
+            json={
+                "dataset_id": dataset_id,
+                "feature_set_id": feature_set_id,
+                "split_definition_id": api_baseline_split["id"],
+                "name": "api-previous-return",
+                "parameters": {"note": "api"},
+            },
+        )
+        assert create_baseline_response.status_code == 200
+        api_baseline = create_baseline_response.json()
         get_experiment_response = client.get(f"/modeling/experiments/{api_experiment['id']}")
         list_experiment_response = client.get(
             f"/modeling/experiments?split_definition_id={api_split['id']}&limit=10"
@@ -412,6 +516,11 @@ def test_model_split_and_experiment_migration_service_and_api() -> None:
     assert list_experiment_response.status_code == 200
     assert api_experiment["dataset_id"] == dataset_id
     assert api_experiment["metrics"] == {"auc": "0.72"}
+    assert api_baseline["split_definition_id"] == api_baseline_split["id"]
+    assert api_baseline["model_name"] == "previous_return_direction"
+    assert api_baseline["status"] == "succeeded"
+    assert api_baseline["metrics"]["overall"]["observations"] == 3
+    assert api_baseline["parameters"]["split_definition"]["id"] == api_baseline_split["id"]
 
     command.downgrade(config, "base")
     command.upgrade(config, "head")

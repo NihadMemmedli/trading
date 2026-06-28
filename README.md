@@ -2,7 +2,7 @@
 
 Greenfield research platform for crypto market data ingestion, strategy research, AI-assisted signal evaluation, backtesting, and paper-trading simulation.
 
-Current state: Phase 1 and Phase 2 are complete, Phase 3 has a reproducible candle-backtest spine, and early Phase 4 feature/AI research slices are complete. The repository has its own local git history, a single runtime package, `trading`, FastAPI health/config/ingestion/dataset/backtest/feature-set/modeling/agent-signal endpoints, safety-first settings validation, public OHLCV, trade, top-20 order book ingestion primitives, Binance public spot provider registry metadata, research-only funding/derivatives metric DTOs and storage primitives, raw Parquet archive support, Timescale-backed candle, trade, order book, derivatives metric, feature row, split definition, model experiment, agent report, trade proposal, and risk decision storage, deterministic offline fixtures, synchronous persisted backtest runs, strategy metadata/version hashing, sizing controls, richer metrics, run events, tests, and local Postgres/TimescaleDB and Redis services. It still has no model adapters, training orchestration, paper-trading signal loop, order execution, wallet, or custody code.
+Current state: Phase 1 and Phase 2 are complete, Phase 3 has a reproducible candle-backtest spine, and early Phase 4 feature/AI research slices are complete. The repository has its own local git history, a single runtime package, `trading`, FastAPI health/config/ingestion/dataset/backtest/feature-set/modeling/agent-signal endpoints, safety-first settings validation, public OHLCV, trade, top-20 order book ingestion primitives, Binance public spot provider registry metadata, research-only funding/derivatives metric DTOs and storage primitives, raw Parquet archive support, Timescale-backed candle, trade, order book, derivatives metric, feature row, split definition, model experiment, agent report, trade proposal, and risk decision storage, deterministic offline fixtures, synchronous persisted backtest runs, strategy metadata/version hashing, sizing controls, richer metrics, deterministic baseline model evaluation, run events, tests, and local Postgres/TimescaleDB and Redis services. It still has no model adapters, training orchestration, paper-trading signal loop, order execution, wallet, or custody code.
 
 ## Safety Boundaries
 
@@ -176,13 +176,16 @@ The model experiment spine records split definitions and experiment results tied
 - `POST /modeling/splits`
 - `GET /modeling/splits/{split_definition_id}`
 - `GET /modeling/splits`
+- `POST /modeling/evaluations/baseline`
 - `POST /modeling/experiments`
 - `GET /modeling/experiments/{experiment_id}`
 - `GET /modeling/experiments`
 
 Split definitions support holdout and walk-forward windows with `train`, `validation`, and `test` ranges. The service validates persisted feature rows for each window and rejects splits where rows are unavailable at the window `decision_time`. Experiment records store dataset ID, feature set ID, split definition ID, parameters, code version, metrics, status, timestamps, and deterministic lineage hashes.
 
-These endpoints persist metadata only. They do not train models, call model providers, orchestrate prompts, create paper-trading signals, or touch execution paths.
+Baseline evaluation currently supports the deterministic `previous_return_direction` benchmark. It reads existing feature rows by split window, uses the previous eligible row's `close_return_1` direction as the prediction for the current row, computes accuracy/confusion-count/rate metrics by split and overall, and persists the result as a succeeded model experiment.
+
+These endpoints persist metadata and deterministic baseline metrics only. They do not train models, call model providers, orchestrate prompts, create paper-trading signals, or touch execution paths.
 
 ## Configuration
 
