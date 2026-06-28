@@ -9,10 +9,25 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from trading.backtesting import BacktestRunStatus
+from trading.backtesting import BacktestRunStatus, BacktestSizingConfig
 from trading.data.market import require_exact_utc, require_utc, validate_symbol, validate_timeframe
 from trading.db.models import BacktestRun
 from trading.services.backtests import BacktestRunRequest
+
+
+class BacktestSizingRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    max_exposure: Decimal = Field(default=Decimal("1"), ge=Decimal("0"), le=Decimal("1"))
+    cash_reserve: Decimal = Field(default=Decimal("0"), ge=Decimal("0"), lt=Decimal("1"))
+    min_trade_notional: Decimal = Field(default=Decimal("0"), ge=Decimal("0"))
+
+    def to_engine_config(self) -> BacktestSizingConfig:
+        return BacktestSizingConfig(
+            max_exposure=self.max_exposure,
+            cash_reserve=self.cash_reserve,
+            min_trade_notional=self.min_trade_notional,
+        )
 
 
 class BacktestRunCreateRequest(BaseModel):
@@ -31,6 +46,7 @@ class BacktestRunCreateRequest(BaseModel):
     slippage_bps: Decimal = Field(ge=Decimal("0"))
     strategy_name: str = Field(default="moving_average_crossover", min_length=1, max_length=128)
     strategy_parameters: dict[str, Any]
+    sizing: BacktestSizingRequest = Field(default_factory=BacktestSizingRequest)
 
     @field_validator("exchange")
     @classmethod
@@ -107,6 +123,7 @@ class BacktestRunCreateRequest(BaseModel):
             slippage_bps=self.slippage_bps,
             strategy_name=self.strategy_name,
             strategy_parameters=self.strategy_parameters,
+            sizing=self.sizing.to_engine_config(),
         )
 
 
@@ -127,6 +144,15 @@ class BacktestEquityPointResponse(BaseModel):
     equity: Decimal
 
 
+class BacktestRunEventResponse(BaseModel):
+    id: int
+    timestamp: datetime
+    level: str
+    event_type: str
+    message: str
+    metadata: dict[str, Any]
+
+
 class BacktestRunSummaryResponse(BaseModel):
     id: uuid.UUID
     status: BacktestRunStatus
@@ -141,7 +167,9 @@ class BacktestRunSummaryResponse(BaseModel):
     fee_bps: Decimal
     slippage_bps: Decimal
     strategy_name: str
+    strategy_version: str | None
     strategy_parameters: dict[str, Any]
+    sizing: dict[str, Any] | None
     dataset_id: int | None
     dataset_hash: str | None
     config_hash: str | None
@@ -171,7 +199,9 @@ class BacktestRunSummaryResponse(BaseModel):
             fee_bps=run.fee_bps,
             slippage_bps=run.slippage_bps,
             strategy_name=run.strategy_name,
+            strategy_version=_report_value(run.report_json, "strategy_version"),
             strategy_parameters=run.strategy_parameters,
+            sizing=_report_value(run.report_json, "sizing"),
             dataset_id=run.dataset_id,
             dataset_hash=run.dataset_hash,
             config_hash=run.config_hash,
@@ -191,6 +221,7 @@ class BacktestRunResponse(BacktestRunSummaryResponse):
     report: dict[str, Any] | None
     trades: list[BacktestTradeResponse] = Field(default_factory=list)
     equity_curve: list[BacktestEquityPointResponse] = Field(default_factory=list)
+    events: list[BacktestRunEventResponse] = Field(default_factory=list)
 
     @classmethod
     def from_run(cls, run: BacktestRun) -> BacktestRunResponse:
@@ -219,8 +250,25 @@ class BacktestRunResponse(BacktestRunSummaryResponse):
                 )
                 for point in getattr(run, "equity_points", ())
             ],
+            events=[
+                BacktestRunEventResponse(
+                    id=event.id,
+                    timestamp=event.timestamp,
+                    level=event.level,
+                    event_type=event.event_type,
+                    message=event.message,
+                    metadata=event.metadata_json,
+                )
+                for event in getattr(run, "events", ())
+            ],
         )
 
 
 class BacktestRunListResponse(BaseModel):
     runs: list[BacktestRunSummaryResponse] = Field(default_factory=list)
+
+
+def _report_value(report_json: dict[str, Any] | None, key: str) -> Any:
+    if report_json is None:
+        return None
+    return report_json.get(key)

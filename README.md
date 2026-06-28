@@ -2,7 +2,7 @@
 
 Greenfield research platform for crypto market data ingestion, strategy research, AI-assisted signal evaluation, backtesting, and paper-trading simulation.
 
-Current state: Phase 1 complete, Phase 2 data foundation in progress. The repository has its own local git history, a single runtime package, `trading`, FastAPI health/config/ingestion endpoints, safety-first settings validation, public OHLCV, trade, top-20 order book ingestion primitives, Binance public spot provider registry metadata, research-only funding/derivatives metric DTOs and storage primitives, raw Parquet archive support, Timescale-backed candle, trade, order book, and derivatives metric storage, deterministic offline fixtures, tests, and local Postgres/TimescaleDB and Redis services. It still has no trading engine, model pipeline, order execution, wallet, or custody code.
+Current state: Phase 1 and Phase 2 are complete, and Phase 3 has a reproducible candle-backtest spine. The repository has its own local git history, a single runtime package, `trading`, FastAPI health/config/ingestion/dataset/backtest endpoints, safety-first settings validation, public OHLCV, trade, top-20 order book ingestion primitives, Binance public spot provider registry metadata, research-only funding/derivatives metric DTOs and storage primitives, raw Parquet archive support, Timescale-backed candle, trade, order book, and derivatives metric storage, deterministic offline fixtures, synchronous persisted backtest runs, strategy metadata/version hashing, sizing controls, richer metrics, run events, tests, and local Postgres/TimescaleDB and Redis services. It still has no model pipeline, order execution, wallet, or custody code.
 
 ## Safety Boundaries
 
@@ -71,13 +71,18 @@ curl -sS -X POST http://localhost:8000/backtests/runs \
     "strategy_parameters": {
       "short_window": 1,
       "long_window": 2
+    },
+    "sizing": {
+      "max_exposure": "1",
+      "cash_reserve": "0",
+      "min_trade_notional": "0"
     }
   }'
 ```
 
 `POST /backtests/runs` and `GET /backtests/runs/{run_id}` return full run details, including
-the dataset lineage id and hash, reproducible report JSON, persisted trades, and persisted equity
-curve:
+the dataset lineage id and hash, strategy version, sizing/risk config, reproducible report JSON,
+persisted trades, persisted equity curve, and structured run events:
 
 ```json
 {
@@ -85,8 +90,10 @@ curve:
   "status": "succeeded",
   "dataset_id": 42,
   "dataset_hash": "dddd...",
-  "metrics": {"trades_count": 1, "final_equity": "1001"},
-  "report": {"report_hash": "...", "metrics": {"trades_count": 1}},
+  "strategy_version": "1",
+  "sizing": {"max_exposure": "1", "cash_reserve": "0", "min_trade_notional": "0"},
+  "metrics": {"trades_count": 1, "final_equity": "1001", "sharpe_like": "0"},
+  "report": {"report_hash": "...", "strategy_version": "1", "metrics": {"trades_count": 1}},
   "trades": [
     {
       "id": 1,
@@ -105,12 +112,22 @@ curve:
       "timestamp": "2026-01-01T00:00:00Z",
       "equity": "1000"
     }
+  ],
+  "events": [
+    {
+      "id": 1,
+      "timestamp": "2026-01-02T00:00:00Z",
+      "level": "info",
+      "event_type": "backtest.started",
+      "message": "backtest run started",
+      "metadata": {"strategy_name": "moving_average_crossover", "strategy_version": "1"}
+    }
   ]
 }
 ```
 
 Use `GET /backtests/runs?limit=50` for a lightweight run list. List responses intentionally omit
-`report`, `trades`, and `equity_curve`; fetch a specific run when those artifacts are needed.
+`report`, `trades`, `equity_curve`, and `events`; fetch a specific run when those artifacts are needed.
 They still include `dataset_id` and `dataset_hash` when lineage is available. Historical succeeded
 runs created before artifact or dataset lineage persistence may return empty artifact arrays or
 `dataset_id: null`.

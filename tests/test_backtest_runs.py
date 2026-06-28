@@ -6,6 +6,7 @@ from decimal import Decimal
 import pytest
 from sqlalchemy.orm import sessionmaker
 
+from trading.backtesting import BacktestSizingConfig
 from trading.services.backtests import (
     BacktestDatasetNotExecutableError,
     BacktestRunRequest,
@@ -54,6 +55,7 @@ def test_backtest_run_request_supports_dataset_id_mode_without_selector_fields()
     )
 
     assert request.dataset_id == 42
+    assert request.sizing == BacktestSizingConfig()
     assert request.exchange is None
     assert request.symbol is None
     assert request.timeframe is None

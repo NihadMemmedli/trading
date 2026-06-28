@@ -19,7 +19,13 @@ from trading.core.settings import Settings
 from trading.data.archive import RawArchiveResult
 from trading.data.market import RawOhlcvBatch
 from trading.data.quality import normalize_ohlcv_batch
-from trading.db.models import BacktestEquityPoint, BacktestRun, BacktestTrade, Dataset
+from trading.db.models import (
+    BacktestEquityPoint,
+    BacktestRun,
+    BacktestRunEvent,
+    BacktestTrade,
+    Dataset,
+)
 from trading.db.session import create_db_engine, create_session_factory
 from trading.services.backtests import (
     BacktestDatasetNotExecutableError,
@@ -135,6 +141,9 @@ def test_backtest_runs_migration_and_real_db_persistence(tmp_path: Path) -> None
         equity_table_name = connection.execute(
             sa.text("SELECT to_regclass('public.backtest_equity_points')")
         ).scalar_one()
+        events_table_name = connection.execute(
+            sa.text("SELECT to_regclass('public.backtest_run_events')")
+        ).scalar_one()
         status_index = connection.execute(
             sa.text(
                 "SELECT indexname FROM pg_indexes "
@@ -154,6 +163,13 @@ def test_backtest_runs_migration_and_real_db_persistence(tmp_path: Path) -> None
                 "SELECT indexname FROM pg_indexes "
                 "WHERE tablename = 'backtest_equity_points' "
                 "AND indexname = 'ix_backtest_equity_points_run_id_timestamp'"
+            )
+        ).scalar_one()
+        events_index = connection.execute(
+            sa.text(
+                "SELECT indexname FROM pg_indexes "
+                "WHERE tablename = 'backtest_run_events' "
+                "AND indexname = 'ix_backtest_run_events_run_id_timestamp'"
             )
         ).scalar_one()
         dataset_id_column = connection.execute(
@@ -183,9 +199,11 @@ def test_backtest_runs_migration_and_real_db_persistence(tmp_path: Path) -> None
     assert table_name == "backtest_runs"
     assert trades_table_name == "backtest_trades"
     assert equity_table_name == "backtest_equity_points"
+    assert events_table_name == "backtest_run_events"
     assert status_index == "ix_backtest_runs_status_created_at"
     assert trades_index == "ix_backtest_trades_run_id_timestamp"
     assert equity_index == "ix_backtest_equity_points_run_id_timestamp"
+    assert events_index == "ix_backtest_run_events_run_id_timestamp"
     assert dataset_id_column == "bigint"
     assert dataset_fk == "fk_backtest_runs_dataset_id"
     assert dataset_index == "ix_backtest_runs_dataset_id"
@@ -212,6 +230,14 @@ def test_backtest_runs_migration_and_real_db_persistence(tmp_path: Path) -> None
     assert first.report_hash is not None
     assert first.metrics_json is not None
     assert first.report_json is not None
+    assert first.report_json["strategy_version"] == "1"
+    assert first.report_json["sizing"] == {
+        "cash_reserve": "0",
+        "max_exposure": "1",
+        "min_trade_notional": "0",
+    }
+    assert first.metrics_json["return_observations"] == 3
+    assert first.metrics_json["sharpe_like"] is not None
     assert first.artifact_path is not None
     assert Path(first.artifact_path).read_text(encoding="utf-8") == Path(
         second.artifact_path or ""
@@ -221,8 +247,16 @@ def test_backtest_runs_migration_and_real_db_persistence(tmp_path: Path) -> None
     assert retrieved.id == first.id
     assert len(first.trades) == first.metrics_json["trades_count"]
     assert len(first.equity_points) == 4
+    assert [event.event_type for event in first.events] == [
+        "backtest.started",
+        "backtest.succeeded",
+    ]
     assert len(retrieved.trades) == first.metrics_json["trades_count"]
     assert len(retrieved.equity_points) == 4
+    assert [event.event_type for event in retrieved.events] == [
+        "backtest.started",
+        "backtest.succeeded",
+    ]
     assert retrieved.trades[0].symbol == "BTC/USDT"
     assert retrieved.trades[0].side == "buy"
     assert [trade.timestamp for trade in retrieved.trades] == [
@@ -280,6 +314,11 @@ def test_backtest_runs_migration_and_real_db_persistence(tmp_path: Path) -> None
             .select_from(BacktestEquityPoint)
             .where(BacktestEquityPoint.run_id == failed.id)
         )
+        failed_event_count = session.scalar(
+            sa.select(sa.func.count())
+            .select_from(BacktestRunEvent)
+            .where(BacktestRunEvent.run_id == failed.id)
+        )
         historical_run = BacktestRun(
             status=BacktestRunStatus.SUCCEEDED.value,
             exchange=request.exchange,
@@ -316,11 +355,13 @@ def test_backtest_runs_migration_and_real_db_persistence(tmp_path: Path) -> None
     assert dataset.decision_time == request.decision_time
     assert failed_trade_count == 0
     assert failed_equity_count == 0
+    assert failed_event_count == 2
 
     historical_retrieved = service.get_run(historical_run_id)
     assert historical_retrieved.dataset_id is None
     assert historical_retrieved.trades == []
     assert historical_retrieved.equity_points == []
+    assert historical_retrieved.events == []
 
 
 def test_backtest_dataset_id_replay_rejects_non_backtest_dataset_and_hash_mismatch(

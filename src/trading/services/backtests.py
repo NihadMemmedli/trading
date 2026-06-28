@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session, selectinload, sessionmaker
 from trading.backtesting import (
     BacktestConfig,
     BacktestRunStatus,
+    BacktestSizingConfig,
     build_backtest_report,
     export_backtest_report_json,
     run_candle_backtest,
@@ -41,6 +42,7 @@ from trading.data.market import (
 from trading.db.models import (
     BacktestEquityPoint,
     BacktestRun,
+    BacktestRunEvent,
     BacktestTrade,
     Candle,
     Dataset,
@@ -48,7 +50,12 @@ from trading.db.models import (
     TradingPair,
 )
 from trading.db.session import session_scope
-from trading.strategies import CandleStrategy, MovingAverageCrossoverStrategy, StrategyParameters
+from trading.strategies import (
+    CandleStrategy,
+    StrategyParameters,
+    build_strategy,
+    get_strategy_metadata,
+)
 
 ERROR_MESSAGE_MAX_LENGTH = 2000
 
@@ -73,6 +80,7 @@ class BacktestRunRequest:
     slippage_bps: Decimal
     strategy_name: str
     strategy_parameters: Mapping[str, Any]
+    sizing: BacktestSizingConfig = BacktestSizingConfig()
     exchange: str | None = None
     symbol: str | None = None
     timeframe: str | None = None
@@ -97,7 +105,18 @@ class NormalizedBacktestRunRequest:
     fee_bps: Decimal
     slippage_bps: Decimal
     strategy_name: str
+    strategy_version: str
     strategy_parameters: StrategyParameters
+    sizing: BacktestSizingConfig
+
+
+@dataclass(frozen=True)
+class PersistedBacktestRunEvent:
+    timestamp: datetime
+    level: str
+    event_type: str
+    message: str
+    metadata: Mapping[str, Any]
 
 
 class BacktestService:
@@ -133,7 +152,9 @@ class BacktestService:
                 end=normalized.end,
                 decision_time=normalized.decision_time,
                 strategy_name=normalized.strategy_name,
+                strategy_version=normalized.strategy_version,
                 strategy_parameters=normalized.strategy_parameters,
+                sizing=normalized.sizing,
             )
             result = run_candle_backtest(
                 candles=candles,
@@ -174,6 +195,7 @@ class BacktestService:
                 .options(
                     selectinload(BacktestRun.trades),
                     selectinload(BacktestRun.equity_points),
+                    selectinload(BacktestRun.events),
                 )
                 .where(BacktestRun.id == run_id)
             ).scalar_one_or_none()
@@ -233,6 +255,7 @@ class BacktestService:
             slippage_bps=request.slippage_bps,
             strategy_name=request.strategy_name,
             strategy_parameters=request.strategy_parameters,
+            sizing=request.sizing,
             dataset_id=dataset.id,
             registered_dataset_hash=dataset.dataset_hash,
         )
@@ -435,12 +458,37 @@ class BacktestService:
                 )
                 for point in equity_curve
             )
+            session.add_all(
+                BacktestRunEvent(
+                    run_id=run.id,
+                    timestamp=event.timestamp,
+                    level=event.level,
+                    event_type=event.event_type,
+                    message=event.message,
+                    metadata_json=dict(event.metadata),
+                )
+                for event in _build_run_events(
+                    request=request,
+                    dataset_id=dataset_id,
+                    status=status,
+                    started_at=started_at,
+                    completed_at=completed_at,
+                    dataset_hash=dataset_hash,
+                    config_hash=config_hash,
+                    result_hash=result_hash,
+                    report_hash=report_hash,
+                    trades_count=len(trades),
+                    equity_points_count=len(equity_curve),
+                    error_message=error_message,
+                )
+            )
             session.flush()
             loaded_run = session.execute(
                 select(BacktestRun)
                 .options(
                     selectinload(BacktestRun.trades),
                     selectinload(BacktestRun.equity_points),
+                    selectinload(BacktestRun.events),
                 )
                 .where(BacktestRun.id == run.id)
             ).scalar_one()
@@ -522,23 +570,81 @@ def _parse_backtest_dataset_name(name: str) -> BacktestDatasetSelector:
     )
 
 
+def _build_run_events(
+    *,
+    request: NormalizedBacktestRunRequest,
+    dataset_id: int | None,
+    status: BacktestRunStatus,
+    started_at: datetime,
+    completed_at: datetime,
+    dataset_hash: str | None,
+    config_hash: str | None,
+    result_hash: str | None,
+    report_hash: str | None,
+    trades_count: int,
+    equity_points_count: int,
+    error_message: str | None,
+) -> tuple[PersistedBacktestRunEvent, ...]:
+    common_metadata = {
+        "exchange": request.exchange,
+        "symbol": request.symbol,
+        "timeframe": request.timeframe,
+        "dataset_id": dataset_id,
+        "strategy_name": request.strategy_name,
+        "strategy_version": request.strategy_version,
+        "sizing": {
+            "max_exposure": str(request.sizing.max_exposure),
+            "cash_reserve": str(request.sizing.cash_reserve),
+            "min_trade_notional": str(request.sizing.min_trade_notional),
+        },
+    }
+    events = [
+        PersistedBacktestRunEvent(
+            timestamp=started_at,
+            level="info",
+            event_type="backtest.started",
+            message="backtest run started",
+            metadata=common_metadata,
+        )
+    ]
+
+    terminal_metadata = {
+        **common_metadata,
+        "dataset_hash": dataset_hash,
+        "config_hash": config_hash,
+        "result_hash": result_hash,
+        "report_hash": report_hash,
+        "trades_count": trades_count,
+        "equity_points_count": equity_points_count,
+    }
+    if status is BacktestRunStatus.SUCCEEDED:
+        events.append(
+            PersistedBacktestRunEvent(
+                timestamp=completed_at,
+                level="info",
+                event_type="backtest.succeeded",
+                message="backtest run succeeded",
+                metadata=terminal_metadata,
+            )
+        )
+    else:
+        events.append(
+            PersistedBacktestRunEvent(
+                timestamp=completed_at,
+                level="error",
+                event_type="backtest.failed",
+                message="backtest run failed",
+                metadata={**terminal_metadata, "error_message": error_message},
+            )
+        )
+    return tuple(events)
+
+
 def build_backtest_strategy(
     strategy_name: str,
     strategy_parameters: Mapping[str, Any],
 ) -> CandleStrategy:
-    normalized_name = strategy_name.strip()
-    if normalized_name != "moving_average_crossover":
-        raise MarketDataError("unsupported strategy_name")
-
-    expected_keys = {"short_window", "long_window"}
-    provided_keys = set(strategy_parameters)
-    if provided_keys != expected_keys:
-        raise MarketDataError("strategy_parameters must include short_window and long_window only")
-
-    return MovingAverageCrossoverStrategy(
-        short_window=_strict_positive_int(strategy_parameters["short_window"], "short_window"),
-        long_window=_strict_positive_int(strategy_parameters["long_window"], "long_window"),
-    )
+    return build_strategy(strategy_name, strategy_parameters)
 
 
 def deterministic_candle_dataset_hash(candles: tuple[NormalizedCandle, ...]) -> str:
@@ -582,6 +688,7 @@ def _normalize_request(request: BacktestRunRequest) -> NormalizedBacktestRunRequ
         slippage_bps=request.slippage_bps,
         strategy_name=request.strategy_name,
         strategy_parameters=request.strategy_parameters,
+        sizing=request.sizing,
         dataset_id=None,
         registered_dataset_hash=None,
     )
@@ -601,6 +708,7 @@ def _normalize_selector_request(
     slippage_bps: Decimal,
     strategy_name: str,
     strategy_parameters: Mapping[str, Any],
+    sizing: BacktestSizingConfig,
     dataset_id: int | None,
     registered_dataset_hash: str | None,
 ) -> NormalizedBacktestRunRequest:
@@ -617,6 +725,7 @@ def _normalize_selector_request(
     end = require_utc(end, field_name="end")
     if start >= end:
         raise MarketDataError("start must be earlier than end")
+    metadata = get_strategy_metadata(strategy_name)
 
     return NormalizedBacktestRunRequest(
         exchange=exchange,
@@ -631,17 +740,11 @@ def _normalize_selector_request(
         initial_capital=Decimal(initial_capital),
         fee_bps=Decimal(fee_bps),
         slippage_bps=Decimal(slippage_bps),
-        strategy_name=strategy_name.strip(),
+        strategy_name=metadata.name,
+        strategy_version=metadata.version,
         strategy_parameters=dict(strategy_parameters),
+        sizing=sizing,
     )
-
-
-def _strict_positive_int(value: Any, field_name: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise MarketDataError(f"{field_name} must be an integer")
-    if value <= 0:
-        raise MarketDataError(f"{field_name} must be positive")
-    return int(value)
 
 
 def _sha256_json(payload: dict[str, Any]) -> str:

@@ -78,11 +78,12 @@ The platform does not own in the MVP:
 
 ### FastAPI API
 
-- Exposes project, dataset, backtest, paper session, and experiment endpoints.
+- Exposes project, ingestion, dataset, backtest, paper session, and experiment endpoints.
 - Validates requests and writes command records to Postgres.
 - Enqueues long-running work in Redis.
 - Returns job status, metrics, artifacts, and result summaries.
 - Avoids running ingestion, feature generation, or backtests in request handlers.
+- Current checkpoint exception: `POST /backtests/runs` executes synchronously while persisting a run record, report JSON, trades, equity curve, dataset lineage, and structured run events. Moving this to a worker-backed queue remains platform debt before long-running backtest workloads.
 
 ### Workers
 
@@ -230,7 +231,10 @@ Core tables and constraints:
 | `agent_reports` | id, pair_id, timestamp, agent_name, report_type, output_json, confidence, created_at | JSONB output; index pair/timestamp and agent_name |
 | `trade_proposals` | id, pair_id, timestamp, source, side, entry_type, entry_price, stop_loss, take_profit_json, confidence, thesis, invalidation, raw_json, status | JSONB take-profit/raw fields; index pair/timestamp/status |
 | `risk_decisions` | proposal_id, decision, reason, max_position_size, max_loss_usd, violated_rules_json, warnings_json, created_at | one active decision per proposal unless superseded explicitly |
-| `backtest_runs` | id, strategy_name, config_json, start_time, end_time, metrics_json, artifact_path, created_at | JSONB config/metrics; index strategy_name and created_at |
+| `backtest_runs` | id, status, selector fields, strategy_name, strategy_parameters, dataset_id, hashes, metrics_json, report_json, artifact_path, timestamps | JSONB metrics/report; index status/created_at, selector fields, and dataset_id |
+| `backtest_trades` | run_id, symbol, timestamp, side, quantity, fill_price, fee, slippage | side and nonnegative numeric checks; index run_id/timestamp |
+| `backtest_equity_points` | run_id, timestamp, equity | nonnegative equity; unique run_id/timestamp |
+| `backtest_run_events` | run_id, timestamp, level, event_type, message, metadata_json | append-only audit log; index run_id/timestamp and event_type/created_at |
 | `orders` | id, environment, exchange, pair, side, order_type, amount, price, status, created_at, updated_at | environment limited to backtest/paper/sandbox in pre-live phases |
 | `positions` | id, environment, pair, side, size, avg_entry, current_price, unrealized_pnl, realized_pnl, opened_at, closed_at | index environment/pair/opened_at |
 | `risk_events` | id, severity, event_type, message, metadata_json, created_at | append-only JSONB metadata; index severity/event_type/created_at |
@@ -288,11 +292,11 @@ Raw files should include source metadata such as exchange, endpoint, symbol, tim
 
 ### Backtesting
 
-1. Researcher selects strategy, dataset, feature set, fees, slippage, and risk constraints.
-2. API creates a `backtest_runs` record and enqueues execution.
-3. Worker runs the backtest with deterministic inputs.
-4. Worker stores trades, equity curve, metrics, logs, and artifacts.
-5. API returns summaries and links to artifacts.
+1. Researcher selects a registered strategy, dataset or explicit point-in-time selector, fees, slippage, and sizing/risk constraints.
+2. Current synchronous API executes the deterministic candle backtest and persists a `backtest_runs` record.
+3. The runner records dataset/config/result/report hashes, strategy version, sizing config, trades, equity curve, metrics, report JSON, and succeeded/failed run events.
+4. `GET /backtests/runs` returns lightweight summaries; `GET /backtests/runs/{run_id}` returns details and artifacts.
+5. Future worker implementation should move step 2 out of the request handler while preserving the same data contracts.
 
 ### Paper Trading
 
@@ -394,7 +398,7 @@ Runtime data directories such as `data/`, `archive/`, and `reports/` are local d
 - Every generated artifact must be traceable to code version, parameters, and input dataset IDs.
 - Raw archive writes are append-only.
 - Normalized data may be repaired, but repairs must be captured in job metadata.
-- Backtests must use explicit fee, slippage, and data window settings.
+- Backtests must use explicit fee, slippage, sizing/risk, strategy version, and data window settings.
 - Model training must never read future data relative to the training split.
 - Live trading code, credentials, and order execution paths are not allowed in the MVP.
 - Sandbox/testnet order submission is not allowed in Phase 1; only disabled configuration placeholders may exist.

@@ -64,19 +64,20 @@ Exit criteria:
 
 ## Phase 3: Research and Backtesting
 
-Status: in progress. The first slice adds a candle-only deterministic strategy interface, moving-average crossover benchmark, next-candle backtest runner, fee/slippage accounting, point-in-time data cutoff, and dataset/config/result hashes. The current checkpoint extends that spine with deterministic turnover, exposure, benchmark, excess-return metrics, and reproducible JSON experiment reports.
+Status: complete for deterministic candle backtests. The implemented spine includes a candle-only deterministic strategy interface, moving-average crossover benchmark, strategy registry metadata and versioning, next-candle backtest runner, fee/slippage accounting, explicit sizing/risk config, point-in-time data cutoff, dataset/config/result/report hashes, persisted trades, persisted equity curves, richer return metrics, reproducible JSON reports, dataset-backed replay, and structured succeeded/failed run events. AI-assisted strategy adapters remain deferred to Phase 4 contracts.
 
 Deliverables:
 
-- Strategy interface for deterministic and AI-assisted signals
+- Strategy interface for deterministic signals; AI-assisted signal contracts are Phase 4 work
 - Backtesting engine with fees, slippage, portfolio accounting, and metrics
 - Baseline strategies for benchmarking
-- Experiment reports with parameters, dataset hashes, and performance metrics
+- Experiment reports with parameters, dataset hashes, strategy version, sizing/risk config, performance metrics, and run events
 
 Exit criteria:
 
 - Every strategy run is reproducible.
-- Results include drawdown, turnover, exposure, fees, and benchmark comparison.
+- Results include drawdown, turnover, exposure, fees, benchmark comparison, return-series summary, and Sharpe-like metrics.
+- Failed and succeeded backtest runs preserve structured audit events.
 
 ## Phase 4: AI Signal Pipeline
 

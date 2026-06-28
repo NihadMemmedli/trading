@@ -48,6 +48,12 @@ class FakeBacktestService:
             "metrics_json": {"trades_count": 1, "final_equity": "1001"},
             "report_json": {
                 "report_hash": "a" * 64,
+                "strategy_version": "1",
+                "sizing": {
+                    "max_exposure": "1",
+                    "cash_reserve": "0",
+                    "min_trade_notional": "0",
+                },
                 "metrics": {"trades_count": 1, "final_equity": "1001"},
             },
             "artifact_path": "/reports/report.json",
@@ -73,6 +79,16 @@ class FakeBacktestService:
                     id=1,
                     timestamp=datetime(2026, 1, 1, tzinfo=UTC),
                     equity=Decimal("1000"),
+                )
+            ],
+            "events": [
+                SimpleNamespace(
+                    id=1,
+                    timestamp=datetime(2026, 1, 1, tzinfo=UTC),
+                    level="info",
+                    event_type="backtest.started",
+                    message="backtest run started",
+                    metadata_json={"strategy_version": "1"},
                 )
             ],
         }
@@ -174,11 +190,23 @@ def test_create_backtest_run_returns_persisted_response() -> None:
     assert body["exchange"] == "binance"
     assert body["symbol"] == "BTC/USDT"
     assert body["strategy_parameters"] == {"short_window": 1, "long_window": 2}
+    assert body["strategy_version"] == "1"
+    assert body["sizing"] == {
+        "max_exposure": "1",
+        "cash_reserve": "0",
+        "min_trade_notional": "0",
+    }
     assert body["dataset_id"] == 42
     assert body["dataset_hash"] == "d" * 64
     assert body["metrics"] == {"trades_count": 1, "final_equity": "1001"}
     assert body["report"] == {
         "report_hash": "a" * 64,
+        "strategy_version": "1",
+        "sizing": {
+            "max_exposure": "1",
+            "cash_reserve": "0",
+            "min_trade_notional": "0",
+        },
         "metrics": {"trades_count": 1, "final_equity": "1001"},
     }
     assert body["trades"] == [
@@ -200,7 +228,36 @@ def test_create_backtest_run_returns_persisted_response() -> None:
             "equity": "1000",
         }
     ]
+    assert body["events"] == [
+        {
+            "id": 1,
+            "timestamp": "2026-01-01T00:00:00Z",
+            "level": "info",
+            "event_type": "backtest.started",
+            "message": "backtest run started",
+            "metadata": {"strategy_version": "1"},
+        }
+    ]
     assert body["artifact_path"] == "/reports/report.json"
+
+
+def test_create_backtest_run_accepts_sizing_config() -> None:
+    service = FakeBacktestService()
+    payload = valid_payload()
+    payload["sizing"] = {
+        "max_exposure": "0.5",
+        "cash_reserve": "0.1",
+        "min_trade_notional": "25",
+    }
+
+    with client_with_fake_service(service) as client:
+        response = client.post("/backtests/runs", json=payload)
+
+    assert response.status_code == 200
+    request = service.requests[0]
+    assert request.sizing.max_exposure == Decimal("0.5")
+    assert request.sizing.cash_reserve == Decimal("0.1")
+    assert request.sizing.min_trade_notional == Decimal("25")
 
 
 def test_create_backtest_run_accepts_dataset_id_mode() -> None:

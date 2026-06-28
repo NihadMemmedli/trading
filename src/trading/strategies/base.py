@@ -6,12 +6,22 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
-from typing import Protocol
+from typing import Any, Protocol
 
 from trading.data.market import NormalizedCandle
 
 StrategyParameterValue = str | int | Decimal
 StrategyParameters = Mapping[str, StrategyParameterValue]
+
+
+@dataclass(frozen=True)
+class StrategyMetadata:
+    """Stable strategy registry metadata included in reproducibility hashes."""
+
+    name: str
+    version: str
+    description: str
+    parameter_schema: Mapping[str, Any]
 
 
 @dataclass(frozen=True)
