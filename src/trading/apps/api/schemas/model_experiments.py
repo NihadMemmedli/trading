@@ -168,6 +168,8 @@ class BaselineEvaluationRequest(BaseModel):
     baseline_name: str = Field(default=DEFAULT_BASELINE_NAME, min_length=1, max_length=128)
     code_version: str = Field(default="baseline_evaluator_v1", min_length=1, max_length=64)
     parameters: dict[str, Any] = Field(default_factory=dict)
+    persist_predictions: bool = False
+    persist_labels: bool = False
 
     def to_service_request(self) -> ServiceBaselineEvaluationRequest:
         return ServiceBaselineEvaluationRequest(
@@ -178,7 +180,20 @@ class BaselineEvaluationRequest(BaseModel):
             baseline_name=self.baseline_name,
             code_version=self.code_version,
             parameters=self.parameters,
+            persist_predictions=self.persist_predictions,
+            persist_labels=self.persist_labels,
         )
+
+
+class BaselineMaterializationRequest(BaselineEvaluationRequest):
+    persist_predictions: bool = True
+    persist_labels: bool = True
+
+    @model_validator(mode="after")
+    def validate_materialization_options(self) -> BaselineMaterializationRequest:
+        if not self.persist_predictions and not self.persist_labels:
+            raise ValueError("at least one of persist_predictions or persist_labels must be true")
+        return self
 
 
 class LabelCreateRequest(BaseModel):
@@ -322,6 +337,43 @@ class ModelExperimentResponse(BaseModel):
 
 class ModelExperimentListResponse(BaseModel):
     model_experiments: list[ModelExperimentResponse] = Field(default_factory=list)
+
+
+class BaselineMaterializationWindowResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    window_index: int
+    split_name: str
+    prediction_count: int
+    label_count: int
+    skipped_first_row_count: int
+
+
+class BaselineMaterializationResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    experiment_id: uuid.UUID
+    experiment: ModelExperimentResponse
+    prediction_count: int
+    label_count: int
+    skipped_first_row_count: int
+    split_counts: dict[str, dict[str, int]]
+    window_counts: list[BaselineMaterializationWindowResponse] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def add_experiment_id(cls, value: Any) -> Any:
+        if hasattr(value, "experiment"):
+            return {
+                "experiment_id": value.experiment.id,
+                "experiment": value.experiment,
+                "prediction_count": value.prediction_count,
+                "label_count": value.label_count,
+                "skipped_first_row_count": value.skipped_first_row_count,
+                "split_counts": value.split_counts,
+                "window_counts": value.window_counts,
+            }
+        return value
 
 
 class LabelResponse(BaseModel):

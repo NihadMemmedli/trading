@@ -32,6 +32,7 @@ SPLIT_TYPES = ("holdout", "walk_forward")
 EXPERIMENT_STATUSES = ("created", "running", "succeeded", "failed")
 DEFAULT_BASELINE_NAME = "previous_return_direction"
 BASELINE_RETURN_FEATURE = "close_return_1"
+BASELINE_LABEL_NAME = "close_return_1_direction"
 
 
 class SplitDefinitionNotFoundError(LookupError):
@@ -105,6 +106,8 @@ class BaselineEvaluationRequest:
     baseline_name: str = DEFAULT_BASELINE_NAME
     code_version: str = "baseline_evaluator_v1"
     parameters: Mapping[str, Any] | None = None
+    persist_predictions: bool = False
+    persist_labels: bool = False
 
 
 @dataclass(frozen=True)
@@ -221,6 +224,25 @@ class ModelPredictionRecord:
 
 
 @dataclass(frozen=True)
+class BaselineMaterializationWindowRecord:
+    window_index: int
+    split_name: str
+    prediction_count: int
+    label_count: int
+    skipped_first_row_count: int
+
+
+@dataclass(frozen=True)
+class BaselineMaterializationRecord:
+    experiment: ModelExperimentRecord
+    prediction_count: int
+    label_count: int
+    skipped_first_row_count: int
+    split_counts: dict[str, dict[str, int]]
+    window_counts: tuple[BaselineMaterializationWindowRecord, ...]
+
+
+@dataclass(frozen=True)
 class PromotionGateRecord:
     model_experiment_id: uuid.UUID
     approved: bool
@@ -246,6 +268,26 @@ class BaselineFeatureRow:
     timeframe: str
     timestamp: datetime
     features: Mapping[str, Any]
+    feature_hash: str = ""
+    decision_time: datetime | None = None
+
+
+@dataclass(frozen=True)
+class BaselinePredictionObservation:
+    window_index: int
+    split_name: str
+    window_decision_time: datetime
+    row: BaselineFeatureRow
+    previous_return: Decimal
+    current_return: Decimal
+
+
+@dataclass(frozen=True)
+class BaselineWindowPredictionObservations:
+    window_index: int
+    split_name: str
+    observations: tuple[BaselinePredictionObservation, ...]
+    skipped_first_row_count: int
 
 
 @dataclass(frozen=True)
@@ -283,6 +325,15 @@ class BaselineMetricCounts:
         self.false_positives += other.false_positives
         self.true_negatives += other.true_negatives
         self.false_negatives += other.false_negatives
+
+
+@dataclass(frozen=True)
+class _BaselineMaterializationCounts:
+    prediction_count: int
+    label_count: int
+    skipped_first_row_count: int
+    split_counts: dict[str, dict[str, int]]
+    window_counts: tuple[BaselineMaterializationWindowRecord, ...]
 
 
 class ModelExperimentService:
@@ -445,6 +496,12 @@ class ModelExperimentService:
         self,
         request: BaselineEvaluationRequest,
     ) -> ModelExperimentRecord:
+        return self.evaluate_baseline_materialization(request).experiment
+
+    def evaluate_baseline_materialization(
+        self,
+        request: BaselineEvaluationRequest,
+    ) -> BaselineMaterializationRecord:
         name = _normalize_name(request.name, field_name="experiment name")
         baseline_name = _normalize_name(request.baseline_name, field_name="baseline_name")
         if baseline_name != DEFAULT_BASELINE_NAME:
@@ -505,8 +562,25 @@ class ModelExperimentService:
             )
             session.add(experiment)
             session.flush()
+            materialization = _materialize_baseline_observations(
+                session,
+                experiment=experiment,
+                split_definition=split_definition,
+                windows=evaluation_windows,
+                baseline_name=baseline_name,
+                code_version=code_version,
+                persist_predictions=request.persist_predictions,
+                persist_labels=request.persist_labels,
+            )
             session.refresh(experiment)
-            return _experiment_record_from_model(experiment)
+            return BaselineMaterializationRecord(
+                experiment=_experiment_record_from_model(experiment),
+                prediction_count=materialization.prediction_count,
+                label_count=materialization.label_count,
+                skipped_first_row_count=materialization.skipped_first_row_count,
+                split_counts=materialization.split_counts,
+                window_counts=materialization.window_counts,
+            )
 
     def get_model_experiment(self, experiment_id: uuid.UUID) -> ModelExperimentRecord:
         with session_scope(self._session_factory) as session:
@@ -983,25 +1057,23 @@ def deterministic_experiment_hash(
 def evaluate_previous_return_direction_baseline(
     windows: Sequence[BaselineEvaluationWindow],
 ) -> dict[str, Any]:
-    if not windows:
-        raise SplitValidationError("at least one evaluation window is required")
-
     overall = BaselineMetricCounts()
     by_split = {split_name: BaselineMetricCounts() for split_name in SPLIT_NAMES}
     window_metrics: list[dict[str, Any]] = []
 
-    for window in windows:
-        window_counts = _evaluate_baseline_window(window)
+    for window_observations in previous_return_direction_baseline_observations(windows):
+        window_counts = _evaluate_baseline_observations(window_observations.observations)
         if window_counts.observations == 0:
             raise SplitValidationError(
-                f"{window.split_name} window {window.window_index} has no baseline observations"
+                f"{window_observations.split_name} window "
+                f"{window_observations.window_index} has no baseline observations"
             )
         overall.extend(window_counts)
-        by_split[window.split_name].extend(window_counts)
+        by_split[window_observations.split_name].extend(window_counts)
         window_metrics.append(
             {
-                "window_index": window.window_index,
-                "split_name": window.split_name,
+                "window_index": window_observations.window_index,
+                "split_name": window_observations.split_name,
                 "metrics": _metric_counts_json(window_counts),
             }
         )
@@ -1017,6 +1089,177 @@ def evaluate_previous_return_direction_baseline(
         },
         "windows": window_metrics,
     }
+
+
+def previous_return_direction_baseline_observations(
+    windows: Sequence[BaselineEvaluationWindow],
+) -> tuple[BaselineWindowPredictionObservations, ...]:
+    if not windows:
+        raise SplitValidationError("at least one evaluation window is required")
+    return tuple(_baseline_window_observations(window) for window in windows)
+
+
+def _materialize_baseline_observations(
+    session: Session,
+    *,
+    experiment: ModelExperiment,
+    split_definition: SplitDefinition,
+    windows: Sequence[BaselineEvaluationWindow],
+    baseline_name: str,
+    code_version: str,
+    persist_predictions: bool,
+    persist_labels: bool,
+) -> _BaselineMaterializationCounts:
+    observation_windows = previous_return_direction_baseline_observations(windows)
+    feature_set = session.get(FeatureSet, experiment.feature_set_id)
+    if feature_set is None:
+        raise ModelExperimentLineageError("feature set not found")
+
+    prediction_count = 0
+    label_count = 0
+    split_counts = {
+        split_name: {
+            "prediction_count": 0,
+            "label_count": 0,
+            "skipped_first_row_count": 0,
+        }
+        for split_name in SPLIT_NAMES
+    }
+    window_counts: list[BaselineMaterializationWindowRecord] = []
+
+    for window_observations in observation_windows:
+        window_prediction_count = 0
+        window_label_count = 0
+        split_counts[window_observations.split_name]["skipped_first_row_count"] += (
+            window_observations.skipped_first_row_count
+        )
+        for observation in window_observations.observations:
+            row = observation.row
+            row_decision_time = row.decision_time
+            if row_decision_time is None:
+                raise SplitValidationError(f"feature row {row.id} is missing decision_time")
+            feature_hash = _normalize_hash(row.feature_hash, field_name="feature_hash")
+
+            if persist_labels:
+                label_value = _baseline_label_value(observation.current_return)
+                metadata = _baseline_observation_metadata(
+                    baseline_name=baseline_name,
+                    window_index=observation.window_index,
+                    split_name=observation.split_name,
+                )
+                existing_label = _find_existing_label(
+                    session,
+                    feature_set_id=experiment.feature_set_id,
+                    feature_row_id=row.id,
+                    label_name=BASELINE_LABEL_NAME,
+                )
+                if existing_label is not None:
+                    raise ModelingConflictError("label already exists")
+                label_hash = deterministic_label_hash(
+                    dataset_id=experiment.dataset_id,
+                    feature_set_id=experiment.feature_set_id,
+                    feature_row_id=row.id,
+                    feature_hash=feature_hash,
+                    label_name=BASELINE_LABEL_NAME,
+                    label_value=label_value,
+                    decision_time=row_decision_time,
+                    observed_at=observation.window_decision_time,
+                    metadata=metadata,
+                )
+                session.add(
+                    Label(
+                        dataset_id=experiment.dataset_id,
+                        feature_set_id=experiment.feature_set_id,
+                        feature_row_id=row.id,
+                        pair_id=row.pair_id,
+                        timeframe=row.timeframe,
+                        timestamp=row.timestamp,
+                        feature_hash=feature_hash,
+                        label_name=BASELINE_LABEL_NAME,
+                        label_value_json=label_value,
+                        label_hash=label_hash,
+                        decision_time=row_decision_time,
+                        observed_at=observation.window_decision_time,
+                        metadata_json=metadata,
+                    )
+                )
+                label_count += 1
+                window_label_count += 1
+                split_counts[window_observations.split_name]["label_count"] += 1
+
+            if persist_predictions:
+                prediction_value = _baseline_prediction_value(observation.previous_return)
+                lineage = _baseline_prediction_lineage(
+                    baseline_name=baseline_name,
+                    code_version=code_version,
+                    split_definition=split_definition,
+                    feature_set=feature_set,
+                    window_index=observation.window_index,
+                    split_name=observation.split_name,
+                )
+                confidence = Decimal("1")
+                prediction_hash = deterministic_prediction_hash(
+                    model_experiment_id=experiment.id,
+                    dataset_id=experiment.dataset_id,
+                    feature_set_id=experiment.feature_set_id,
+                    split_definition_id=experiment.split_definition_id,
+                    feature_row_id=row.id,
+                    feature_hash=feature_hash,
+                    prediction_value=prediction_value,
+                    confidence=confidence,
+                    decision_time=observation.window_decision_time,
+                    lineage=lineage,
+                )
+                existing_prediction = _find_existing_model_prediction(
+                    session,
+                    model_experiment_id=experiment.id,
+                    feature_row_id=row.id,
+                    prediction_hash=prediction_hash,
+                )
+                if existing_prediction is not None:
+                    raise ModelingConflictError("model prediction already exists")
+                session.add(
+                    ModelPrediction(
+                        model_experiment_id=experiment.id,
+                        dataset_id=experiment.dataset_id,
+                        feature_set_id=experiment.feature_set_id,
+                        split_definition_id=experiment.split_definition_id,
+                        feature_row_id=row.id,
+                        pair_id=row.pair_id,
+                        timeframe=row.timeframe,
+                        timestamp=row.timestamp,
+                        feature_hash=feature_hash,
+                        prediction_value_json=prediction_value,
+                        confidence=confidence,
+                        decision_time=observation.window_decision_time,
+                        feature_row_decision_time=row_decision_time,
+                        prediction_hash=prediction_hash,
+                        lineage_json=lineage,
+                    )
+                )
+                prediction_count += 1
+                window_prediction_count += 1
+                split_counts[window_observations.split_name]["prediction_count"] += 1
+
+        window_counts.append(
+            BaselineMaterializationWindowRecord(
+                window_index=window_observations.window_index,
+                split_name=window_observations.split_name,
+                prediction_count=window_prediction_count,
+                label_count=window_label_count,
+                skipped_first_row_count=window_observations.skipped_first_row_count,
+            )
+        )
+
+    return _BaselineMaterializationCounts(
+        prediction_count=prediction_count,
+        label_count=label_count,
+        skipped_first_row_count=sum(
+            counts["skipped_first_row_count"] for counts in split_counts.values()
+        ),
+        split_counts=split_counts,
+        window_counts=tuple(window_counts),
+    )
 
 
 def _find_existing_split_definition(
@@ -1116,6 +1359,7 @@ def _load_baseline_evaluation_windows(
                 FeatureRow.timestamp >= window.start,
                 FeatureRow.timestamp <= window.end,
                 FeatureRow.available_at <= window.decision_time,
+                FeatureRow.decision_time <= window.decision_time,
             )
             .order_by(
                 FeatureRow.pair_id,
@@ -1138,6 +1382,8 @@ def _load_baseline_evaluation_windows(
                         timeframe=row.timeframe,
                         timestamp=row.timestamp,
                         features=dict(row.features_json),
+                        feature_hash=row.feature_hash,
+                        decision_time=row.decision_time,
                     )
                     for row in rows
                 ),
@@ -1207,8 +1453,11 @@ def _normalize_windows(
     return tuple(sorted(normalized, key=lambda item: (item.window_index, item.split_name)))
 
 
-def _evaluate_baseline_window(window: BaselineEvaluationWindow) -> BaselineMetricCounts:
-    counts = BaselineMetricCounts()
+def _baseline_window_observations(
+    window: BaselineEvaluationWindow,
+) -> BaselineWindowPredictionObservations:
+    observations: list[BaselinePredictionObservation] = []
+    skipped_first_row_count = 0
     grouped_rows: dict[tuple[int, str], list[BaselineFeatureRow]] = {}
     for row in window.rows:
         grouped_rows.setdefault((row.pair_id, row.timeframe), []).append(row)
@@ -1219,13 +1468,96 @@ def _evaluate_baseline_window(window: BaselineEvaluationWindow) -> BaselineMetri
             current_return = _close_return_1(row)
             if previous_return is None:
                 previous_return = current_return
+                skipped_first_row_count += 1
                 continue
-            counts.add(
-                predicted_positive=previous_return > 0,
-                target_positive=current_return > 0,
+            observations.append(
+                BaselinePredictionObservation(
+                    window_index=window.window_index,
+                    split_name=window.split_name,
+                    window_decision_time=window.decision_time,
+                    row=row,
+                    previous_return=previous_return,
+                    current_return=current_return,
+                )
             )
             previous_return = current_return
+    return BaselineWindowPredictionObservations(
+        window_index=window.window_index,
+        split_name=window.split_name,
+        observations=tuple(observations),
+        skipped_first_row_count=skipped_first_row_count,
+    )
+
+
+def _evaluate_baseline_observations(
+    observations: Sequence[BaselinePredictionObservation],
+) -> BaselineMetricCounts:
+    counts = BaselineMetricCounts()
+    for observation in observations:
+        counts.add(
+            predicted_positive=observation.previous_return > 0,
+            target_positive=observation.current_return > 0,
+        )
     return counts
+
+
+def _baseline_label_value(current_return: Decimal) -> dict[str, Any]:
+    return {
+        "direction": _return_direction(current_return),
+        "positive": current_return > 0,
+        "return": str(current_return),
+        "source_feature": BASELINE_RETURN_FEATURE,
+    }
+
+
+def _baseline_prediction_value(previous_return: Decimal) -> dict[str, Any]:
+    return {
+        "direction": _return_direction(previous_return),
+        "positive": previous_return > 0,
+        "source_feature": BASELINE_RETURN_FEATURE,
+        "source_return": str(previous_return),
+    }
+
+
+def _baseline_observation_metadata(
+    *,
+    baseline_name: str,
+    window_index: int,
+    split_name: str,
+) -> dict[str, Any]:
+    return {
+        "producer": baseline_name,
+        "window_index": window_index,
+        "split_name": split_name,
+        "positive_threshold": "0",
+    }
+
+
+def _baseline_prediction_lineage(
+    *,
+    baseline_name: str,
+    code_version: str,
+    split_definition: SplitDefinition,
+    feature_set: FeatureSet,
+    window_index: int,
+    split_name: str,
+) -> dict[str, Any]:
+    return {
+        "producer": baseline_name,
+        "code_version": code_version,
+        "feature_set_hash": feature_set.feature_set_hash,
+        "dataset_hash": feature_set.dataset_hash,
+        "split_definition_id": split_definition.id,
+        "split_hash": split_definition.split_hash,
+        "window_index": window_index,
+        "split_name": split_name,
+        "prediction_feature": BASELINE_RETURN_FEATURE,
+        "positive_threshold": "0",
+    }
+
+
+def _return_direction(value: Decimal) -> str:
+    return "up" if value > 0 else "down"
 
 
 def _close_return_1(row: BaselineFeatureRow) -> Decimal:

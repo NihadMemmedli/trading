@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from decimal import Decimal
 
 import pytest
 
@@ -9,6 +10,8 @@ from trading.services.model_experiments import (
     BaselineFeatureRow,
     SplitValidationError,
     SplitWindowCreateRequest,
+    _baseline_label_value,
+    _baseline_prediction_value,
     _normalize_windows,
     _validate_window_shape,
     deterministic_experiment_hash,
@@ -17,6 +20,7 @@ from trading.services.model_experiments import (
     deterministic_prediction_hash,
     deterministic_split_hash,
     evaluate_previous_return_direction_baseline,
+    previous_return_direction_baseline_observations,
 )
 
 
@@ -203,6 +207,44 @@ def test_previous_return_direction_baseline_skips_first_row_per_window() -> None
 
     assert metrics["overall"]["observations"] == 3
     assert metrics["overall"]["true_positives"] == 3
+
+
+def test_previous_return_direction_observations_skip_first_row_per_window() -> None:
+    observation_windows = previous_return_direction_baseline_observations(
+        baseline_windows(
+            (
+                baseline_row(1, 1, "0.10"),
+                baseline_row(2, 2, "-0.05"),
+                baseline_row(3, 3, "-0.02"),
+            )
+        )
+    )
+
+    assert [window.skipped_first_row_count for window in observation_windows] == [1, 1, 1]
+    assert [len(window.observations) for window in observation_windows] == [2, 2, 2]
+    first_observation = observation_windows[0].observations[0]
+    assert first_observation.row.id == 2
+    assert first_observation.previous_return == Decimal("0.10")
+    assert first_observation.current_return == Decimal("-0.05")
+
+
+def test_baseline_label_and_prediction_values_are_deterministic() -> None:
+    label_value = _baseline_label_value(Decimal("-0.05"))
+    prediction_value = _baseline_prediction_value(Decimal("0.10"))
+
+    assert label_value == {
+        "direction": "down",
+        "positive": False,
+        "return": "-0.05",
+        "source_feature": "close_return_1",
+    }
+    assert prediction_value == {
+        "direction": "up",
+        "positive": True,
+        "source_feature": "close_return_1",
+        "source_return": "0.10",
+    }
+    assert _baseline_prediction_value(Decimal("0.10")) == prediction_value
 
 
 def test_previous_return_direction_baseline_rejects_zero_observation_split() -> None:
