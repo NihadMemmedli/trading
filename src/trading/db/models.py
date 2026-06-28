@@ -75,6 +75,7 @@ class TradingPair(Base):
     quote_asset: Mapped[Asset] = relationship(foreign_keys=[quote_asset_id])
     agent_reports: Mapped[list[AgentReport]] = relationship(back_populates="pair")
     trade_proposals: Mapped[list[TradeProposal]] = relationship(back_populates="pair")
+    feature_rows: Mapped[list[FeatureRow]] = relationship(back_populates="pair")
 
 
 class AgentReport(Base):
@@ -399,6 +400,87 @@ class Dataset(Base):
     )
 
     backtest_runs: Mapped[list[BacktestRun]] = relationship(back_populates="dataset")
+    feature_sets: Mapped[list[FeatureSet]] = relationship(back_populates="dataset")
+
+
+class FeatureSet(Base):
+    __tablename__ = "feature_sets"
+    __table_args__ = (
+        UniqueConstraint("dataset_id", "name", "parameter_hash", "code_version"),
+        Index("ix_feature_sets_dataset_id", "dataset_id"),
+        Index("ix_feature_sets_hash", "feature_set_hash"),
+        Index("ix_feature_sets_parameter_hash", "parameter_hash"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    dataset_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("datasets.id"),
+        nullable=False,
+    )
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    dataset_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    feature_set_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    parameter_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    code_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    parameters_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    feature_names_json: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    selector_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    output_location: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    dataset: Mapped[Dataset] = relationship(back_populates="feature_sets")
+    rows: Mapped[list[FeatureRow]] = relationship(
+        back_populates="feature_set",
+        cascade="all, delete-orphan",
+        order_by="FeatureRow.timestamp, FeatureRow.id",
+    )
+
+
+class FeatureRow(Base):
+    __tablename__ = "feature_rows"
+    __table_args__ = (
+        CheckConstraint(
+            "available_at <= decision_time",
+            name="feature_row_available_before_decision",
+        ),
+        UniqueConstraint(
+            "feature_set_id",
+            "pair_id",
+            "timeframe",
+            "timestamp",
+            "decision_time",
+        ),
+        Index("ix_feature_rows_feature_set_timestamp", "feature_set_id", "timestamp"),
+        Index(
+            "ix_feature_rows_pair_timeframe_available_at",
+            "pair_id",
+            "timeframe",
+            "available_at",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    feature_set_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("feature_sets.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    pair_id: Mapped[int] = mapped_column(ForeignKey("trading_pairs.id"), nullable=False)
+    timeframe: Mapped[str] = mapped_column(String(16), nullable=False)
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    decision_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    features_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    feature_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    feature_set: Mapped[FeatureSet] = relationship(back_populates="rows")
+    pair: Mapped[TradingPair] = relationship(back_populates="feature_rows")
 
 
 class Candle(Base):

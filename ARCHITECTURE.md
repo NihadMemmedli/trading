@@ -203,7 +203,6 @@ Timescale hypertables:
 - `trades`
 - `order_book_snapshots`
 - `derivatives_metrics`
-- `features`, if feature volume remains queryable in Postgres
 
 Large feature matrices may move to Parquet if database storage becomes inefficient.
 
@@ -225,7 +224,8 @@ Core tables and constraints:
 | `protocol_metrics` | asset_id, timestamp, tvl_usd, fees_usd, revenue_usd, dex_volume_usd, stablecoin_supply_usd, source, ingested_at, available_at | unique asset/timestamp/source; index asset/timestamp |
 | `news_items` | id, asset_id nullable, source, title, url_hash, published_at, collected_at, available_at, content_hash, raw_text, relevance_score | unique url_hash/source and content_hash/source; index published_at and asset_id |
 | `sentiment_scores` | news_item_id, asset_id nullable, model_name, label, score, confidence, reason, created_at | unique news/model/asset; index asset/created_at |
-| `features` | pair_id, timeframe, timestamp, feature_set_name, features_json, features_hash, created_at, available_at | unique pair/timeframe/timestamp/feature_set_name; JSONB payload; index pair/timeframe/timestamp |
+| `feature_sets` | id, dataset_id, name, dataset_hash, feature_set_hash, parameter_hash, code_version, parameters_json, feature_names_json, selector_json, output_location, created_at | unique dataset/name/parameter/code version; index dataset_id, feature_set_hash, and parameter_hash |
+| `feature_rows` | feature_set_id, pair_id, timeframe, timestamp, decision_time, available_at, features_json, feature_hash, created_at | unique feature_set/pair/timeframe/timestamp/decision_time; JSONB payload; check available_at <= decision_time; index feature_set/timestamp and pair/timeframe/available_at |
 | `labels` | pair_id, timeframe, timestamp, horizon, forward_return, mfe, mae, label, created_at | unique pair/timeframe/timestamp/horizon; labels never join into features |
 | `model_predictions` | pair_id, timeframe, timestamp, model_name, model_version, prediction, confidence, features_hash, created_at | index pair/timeframe/timestamp and model/version |
 | `agent_reports` | id, pair_id, timestamp, agent_name, report_type, output_json, confidence, created_at | JSONB output; index pair/timestamp and agent_name |

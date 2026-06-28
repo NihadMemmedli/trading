@@ -81,11 +81,11 @@ Exit criteria:
 
 ## Phase 4: AI Signal Pipeline
 
-Status: first contract slice complete. Strict analyst report, trade proposal, and risk decision schemas are implemented with JSONB-backed persistence, API routes, Alembic migration `20260627_0011_ai_signal_contracts.py`, and tests. Model adapters, orchestration, feature pipeline work, paper-trading integration, and execution paths remain deferred.
+Status: first contract and feature-set registry slices complete. Strict analyst report, trade proposal, and risk decision schemas are implemented with JSONB-backed persistence, API routes, Alembic migration `20260627_0011_ai_signal_contracts.py`, and tests. Feature-set metadata, deterministic low-volume candle features, feature row lineage, point-in-time reads, and API routes are implemented with Alembic migration `20260627_0012_feature_sets.py`. Model adapters, orchestration, train/validation/test split workflows, paper-trading integration, and execution paths remain deferred.
 
 Deliverables:
 
-- Feature pipeline with strict train/test separation
+- Feature pipeline with strict train/test separation; feature-set registry and point-in-time MVP candle materialization are complete
 - Model evaluation workflow with walk-forward validation
 - Prompt/model adapters only where they add measurable value
 - Guardrails against look-ahead bias, leakage, and overfitting

@@ -11,6 +11,7 @@ from trading.db.session import create_db_engine, create_session_factory
 from trading.services.agent_signals import AgentSignalService
 from trading.services.backtests import BacktestService
 from trading.services.datasets import DatasetService
+from trading.services.feature_sets import FeatureSetService
 from trading.services.ingestion import IngestionService
 from trading.services.risk_decisions import RiskDecisionService
 
@@ -39,6 +40,14 @@ def get_dataset_service(settings: SettingsDependency) -> DatasetService:
 
 
 DatasetServiceDependency = Annotated[DatasetService, Depends(get_dataset_service)]
+
+
+def get_feature_set_service(settings: SettingsDependency) -> FeatureSetService:
+    engine = create_db_engine(settings)
+    return FeatureSetService(create_session_factory(engine))
+
+
+FeatureSetServiceDependency = Annotated[FeatureSetService, Depends(get_feature_set_service)]
 
 
 def get_backtest_service(settings: SettingsDependency) -> BacktestService:
