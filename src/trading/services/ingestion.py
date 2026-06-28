@@ -1,4 +1,4 @@
-"""OHLCV ingestion service and persistence operations."""
+"""Market-data ingestion service and persistence operations."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from trading.data.archive import RawArchiveResult
 from trading.data.market import (
     IngestionStatus,
     NormalizedCandle,
+    NormalizedTrade,
     OhlcvRequest,
     require_utc,
     utc_now,
@@ -26,6 +27,7 @@ from trading.db.models import (
     Exchange,
     IngestionRun,
     RawArtifact,
+    Trade,
     TradingPair,
 )
 from trading.db.session import session_scope
@@ -39,6 +41,10 @@ class DuplicateCandleError(ValueError):
     """Raised when duplicate candle keys are inserted."""
 
 
+class DuplicateTradeError(ValueError):
+    """Raised when duplicate trade keys are inserted."""
+
+
 @dataclass(frozen=True)
 class PersistedDataset:
     dataset_hash: str
@@ -46,7 +52,7 @@ class PersistedDataset:
 
 
 class IngestionService:
-    """Coordinates run metadata and public OHLCV persistence."""
+    """Coordinates run metadata and public market-data persistence."""
 
     def __init__(self, session_factory: sessionmaker[Session]) -> None:
         self._session_factory = session_factory
@@ -195,6 +201,34 @@ class IngestionService:
                 raise DuplicateCandleError("duplicate candle key") from exc
         return len(materialized)
 
+    def insert_trades(self, trades: Iterable[NormalizedTrade]) -> int:
+        materialized = list(trades)
+        if not materialized:
+            return 0
+
+        with session_scope(self._session_factory) as session:
+            try:
+                for trade in materialized:
+                    pair = self._get_or_create_pair(session, trade.exchange, trade.symbol)
+                    session.add(
+                        Trade(
+                            pair_id=pair.id,
+                            source=trade.exchange,
+                            timestamp=trade.timestamp,
+                            trade_id=trade.trade_id,
+                            side=trade.side,
+                            price=trade.price,
+                            amount=trade.amount,
+                            available_at=trade.available_at,
+                            raw_checksum=trade.raw_checksum,
+                            quality_flags=trade.quality_flags,
+                        )
+                    )
+                session.flush()
+            except IntegrityError as exc:
+                raise DuplicateTradeError("duplicate trade key") from exc
+        return len(materialized)
+
     def point_in_time_candles(
         self,
         *,
@@ -241,6 +275,58 @@ class IngestionService:
             for candle in candles:
                 session.expunge(candle)
             return candles
+
+    def point_in_time_trades(
+        self,
+        *,
+        exchange: str,
+        symbol: str,
+        decision_time: datetime,
+        start_time: datetime | None = None,
+        end_time: datetime | None = None,
+        source: str | None = None,
+        limit: int | None = None,
+    ) -> list[Trade]:
+        parsed_decision_time = require_utc(decision_time, field_name="decision_time")
+        parsed_start_time = (
+            require_utc(start_time, field_name="start_time") if start_time is not None else None
+        )
+        parsed_end_time = (
+            require_utc(end_time, field_name="end_time") if end_time is not None else None
+        )
+        if (
+            parsed_start_time is not None
+            and parsed_end_time is not None
+            and parsed_start_time >= parsed_end_time
+        ):
+            raise ValueError("start_time must be earlier than end_time")
+        if limit is not None and limit < 1:
+            raise ValueError("limit must be positive")
+
+        with session_scope(self._session_factory) as session:
+            pair = self._find_pair(session, exchange, symbol)
+            if pair is None:
+                return []
+            filters = [
+                Trade.pair_id == pair.id,
+                Trade.available_at <= parsed_decision_time,
+            ]
+            if parsed_start_time is not None:
+                filters.append(Trade.timestamp >= parsed_start_time)
+            if parsed_end_time is not None:
+                filters.append(Trade.timestamp < parsed_end_time)
+            if source is not None:
+                filters.append(Trade.source == source)
+
+            query: Select[tuple[Trade]] = (
+                select(Trade).where(*filters).order_by(Trade.timestamp, Trade.trade_id)
+            )
+            if limit is not None:
+                query = query.limit(limit)
+            trades = list(session.execute(query).scalars().all())
+            for trade in trades:
+                session.expunge(trade)
+            return trades
 
     def persist_dataset(
         self,

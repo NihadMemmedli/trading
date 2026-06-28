@@ -43,7 +43,7 @@ Exit criteria:
 
 ## Phase 2: Data Foundation
 
-Status: in progress. Public OHLCV ingestion, raw archive writes, normalized candle persistence, point-in-time candle reads, and deterministic offline OHLCV fixtures are implemented for the MVP symbol universe.
+Status: in progress. Public OHLCV ingestion, public trade ingestion primitives, raw archive writes, normalized candle and trade persistence, point-in-time candle and trade reads, and deterministic offline fixtures are implemented for the MVP symbol universe.
 
 Deliverables:
 
@@ -56,10 +56,10 @@ Deliverables:
 
 Exit criteria:
 
-- Backtests can load deterministic historical candle data without network access.
-- Data quality failures for timestamps, duplicates, gaps, invalid OHLCV ranges, and symbols are explicit and test-covered.
-- UTC timestamp validation, duplicate candle constraints, bounded point-in-time reads, and point-in-time indexes are tested.
-- Remaining before Phase 2 completion: trades, order book snapshots, funding/derivatives interfaces, and broader metadata tables.
+- Backtests can load deterministic historical candle and trade data without network access.
+- Data quality failures for timestamps, duplicates, gaps, invalid OHLCV ranges, malformed trade sides, invalid trade values, and symbols are explicit and test-covered.
+- UTC timestamp validation, duplicate candle and trade constraints, bounded point-in-time reads, and point-in-time indexes are tested.
+- Remaining before Phase 2 completion: order book snapshots, funding/derivatives interfaces, and provider registry metadata.
 
 ## Phase 3: Research and Backtesting
 

@@ -1,0 +1,3 @@
+{"id":"btc-001","timestamp":"2026-01-01T00:00:05Z","side":"buy","price":"42001.10","amount":"0.125"}
+{"id":"btc-002","timestamp":"2026-01-01T00:00:21Z","side":"sell","price":"42003.20","amount":"0.080"}
+{"id":"btc-003","timestamp":"2026-01-01T00:01:08Z","side":"buy","price":"42010.00","amount":"0.215"}

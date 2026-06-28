@@ -60,7 +60,7 @@ def test_public_adapter_exports_no_private_or_execution_methods() -> None:
         if not name.startswith("_")
     }
 
-    assert method_names == {"fetch_ohlcv"}
+    assert method_names == {"fetch_ohlcv", "fetch_trades"}
     assert not any(
         fragment in method_name.lower()
         for method_name in method_names

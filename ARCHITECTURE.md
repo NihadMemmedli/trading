@@ -216,6 +216,7 @@ Core tables and constraints:
 | `exchanges` | id, name, type, is_active | unique name |
 | `trading_pairs` | id, exchange_id, base_asset_id, quote_asset_id, symbol, precision fields, min_order_size, is_active | unique exchange/symbol; index base/quote assets |
 | `candles` | pair_id, timeframe, timestamp, open, high, low, close, volume, source, ingested_at, available_at | unique pair/timeframe/timestamp/source; index pair/timeframe/timestamp |
+| `trades` | pair_id, source, trade_id, timestamp, side, price, amount, available_at | unique pair/source/timestamp/trade_id; index pair/source/available_at/timestamp |
 | `orderbook_snapshots` | pair_id, timestamp, best_bid, best_ask, spread_bps, depth fields, imbalance, source, ingested_at, available_at | index pair/timestamp; reject negative prices/spreads |
 | `derivatives_metrics` | pair_id, timestamp, funding_rate, open_interest, long_short_ratio, liquidation fields, source, ingested_at, available_at | index pair/timestamp; spot MVP may leave empty |
 | `protocol_metrics` | asset_id, timestamp, tvl_usd, fees_usd, revenue_usd, dex_volume_usd, stablecoin_supply_usd, source, ingested_at, available_at | unique asset/timestamp/source; index asset/timestamp |

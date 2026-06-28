@@ -1,4 +1,4 @@
-"""Offline OHLCV dataset loading for deterministic research and backtests."""
+"""Offline market-data dataset loading for deterministic research and backtests."""
 
 from __future__ import annotations
 
@@ -9,8 +9,20 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from trading.data.market import NormalizedCandle, RawOhlcvBatch, parse_timestamp, require_utc
-from trading.data.quality import deterministic_dataset_hash, normalize_ohlcv_batch
+from trading.data.market import (
+    NormalizedCandle,
+    NormalizedTrade,
+    RawOhlcvBatch,
+    RawTradeBatch,
+    parse_timestamp,
+    require_utc,
+)
+from trading.data.quality import (
+    deterministic_dataset_hash,
+    deterministic_trade_dataset_hash,
+    normalize_ohlcv_batch,
+    normalize_trade_batch,
+)
 
 
 @dataclass(frozen=True)
@@ -18,6 +30,13 @@ class OhlcvFixtureSpec:
     path: Path
     symbol: str
     timeframe: str
+    exchange: str = "binance"
+
+
+@dataclass(frozen=True)
+class TradeFixtureSpec:
+    path: Path
+    symbol: str
     exchange: str = "binance"
 
 
@@ -31,6 +50,18 @@ class OfflineOhlcvDataset:
     @property
     def symbols(self) -> tuple[str, ...]:
         return tuple(sorted({candle.symbol for candle in self.candles}))
+
+
+@dataclass(frozen=True)
+class OfflineTradeDataset:
+    name: str
+    decision_time: datetime
+    trades: tuple[NormalizedTrade, ...]
+    dataset_hash: str
+
+    @property
+    def symbols(self) -> tuple[str, ...]:
+        return tuple(sorted({trade.symbol for trade in self.trades}))
 
 
 def load_raw_ohlcv_jsonl(spec: OhlcvFixtureSpec, *, fetched_at: str) -> RawOhlcvBatch:
@@ -56,6 +87,26 @@ def load_raw_ohlcv_jsonl(spec: OhlcvFixtureSpec, *, fetched_at: str) -> RawOhlcv
         exchange=spec.exchange,
         symbol=spec.symbol,
         timeframe=spec.timeframe,
+        rows=rows,
+        fetched_at=parse_timestamp(fetched_at, field_name="fetched_at"),
+    )
+
+
+def load_raw_trade_jsonl(spec: TradeFixtureSpec, *, fetched_at: str) -> RawTradeBatch:
+    rows: list[dict[str, Any]] = []
+    with spec.path.open("r", encoding="utf-8") as file:
+        for line_number, line in enumerate(file, start=1):
+            item = json.loads(line)
+            try:
+                for required_field in ("id", "timestamp", "side", "price", "amount"):
+                    item[required_field]
+            except KeyError as exc:
+                raise ValueError(f"{spec.path}:{line_number} is missing {exc.args[0]}") from exc
+            rows.append(item)
+
+    return RawTradeBatch(
+        exchange=spec.exchange,
+        symbol=spec.symbol,
         rows=rows,
         fetched_at=parse_timestamp(fetched_at, field_name="fetched_at"),
     )
@@ -90,4 +141,36 @@ def build_offline_ohlcv_dataset(
         decision_time=parsed_decision_time,
         candles=sorted_candles,
         dataset_hash=deterministic_dataset_hash(list(sorted_candles)),
+    )
+
+
+def build_offline_trade_dataset(
+    *,
+    name: str,
+    fixtures: list[TradeFixtureSpec],
+    decision_time: str,
+) -> OfflineTradeDataset:
+    parsed_decision_time = parse_timestamp(decision_time, field_name="decision_time")
+    require_utc(parsed_decision_time, field_name="decision_time")
+
+    trades: list[NormalizedTrade] = []
+    for fixture in fixtures:
+        raw_checksum = hashlib.sha256(fixture.path.read_bytes()).hexdigest()
+        batch = load_raw_trade_jsonl(fixture, fetched_at=decision_time)
+        trades.extend(
+            normalize_trade_batch(
+                batch,
+                raw_checksum=raw_checksum,
+                now=parsed_decision_time,
+            )
+        )
+
+    sorted_trades = tuple(
+        sorted(trades, key=lambda trade: (trade.symbol, trade.timestamp, trade.trade_id))
+    )
+    return OfflineTradeDataset(
+        name=name,
+        decision_time=parsed_decision_time,
+        trades=sorted_trades,
+        dataset_hash=deterministic_trade_dataset_hash(list(sorted_trades)),
     )

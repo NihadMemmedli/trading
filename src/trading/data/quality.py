@@ -1,7 +1,9 @@
-"""Deterministic OHLCV normalization and quality checks."""
+"""Deterministic market-data normalization and quality checks."""
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -10,7 +12,9 @@ from trading.data.market import (
     TIMEFRAME_SECONDS,
     MarketDataError,
     NormalizedCandle,
+    NormalizedTrade,
     RawOhlcvBatch,
+    RawTradeBatch,
     parse_timestamp,
     utc_now,
 )
@@ -42,6 +46,20 @@ def validate_ohlcv_range(
         raise MarketDataError("low must be at most open, close, and high")
 
 
+def validate_trade_values(*, price: Decimal, amount: Decimal) -> None:
+    if min(price, amount) < Decimal("0"):
+        raise MarketDataError("trade price and amount must be nonnegative")
+
+
+def normalize_trade_side(value: Any) -> str:
+    if not isinstance(value, str):
+        raise MarketDataError("trade side must be buy or sell")
+    side = value.strip().lower()
+    if side not in {"buy", "sell"}:
+        raise MarketDataError("trade side must be buy or sell")
+    return side
+
+
 def detect_duplicate_timestamps(timestamps: list[datetime]) -> list[datetime]:
     seen: set[datetime] = set()
     duplicates: list[datetime] = []
@@ -49,6 +67,16 @@ def detect_duplicate_timestamps(timestamps: list[datetime]) -> list[datetime]:
         if timestamp in seen and timestamp not in duplicates:
             duplicates.append(timestamp)
         seen.add(timestamp)
+    return duplicates
+
+
+def detect_duplicate_values(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    duplicates: list[str] = []
+    for value in values:
+        if value in seen and value not in duplicates:
+            duplicates.append(value)
+        seen.add(value)
     return duplicates
 
 
@@ -125,8 +153,6 @@ def normalize_ohlcv_batch(
 
 
 def deterministic_dataset_hash(candles: list[NormalizedCandle]) -> str:
-    import hashlib
-
     digest = hashlib.sha256()
     for candle in sorted(candles, key=lambda item: (item.symbol, item.timeframe, item.timestamp)):
         line = "|".join(
@@ -142,6 +168,118 @@ def deterministic_dataset_hash(candles: list[NormalizedCandle]) -> str:
                 str(candle.volume),
                 candle.available_at.isoformat(),
                 candle.raw_checksum,
+            ]
+        )
+        digest.update(line.encode("utf-8"))
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def parse_trade_timestamp(row: dict[str, Any]) -> datetime:
+    timestamp = row.get("timestamp")
+    if timestamp is not None:
+        return parse_timestamp(timestamp, field_name="timestamp")
+    datetime_value = row.get("datetime")
+    if datetime_value is not None:
+        return parse_timestamp(datetime_value, field_name="datetime")
+    raise MarketDataError("trade row must contain timestamp or datetime")
+
+
+def deterministic_trade_id(
+    *,
+    exchange: str,
+    symbol: str,
+    timestamp: datetime,
+    side: str,
+    price: Decimal,
+    amount: Decimal,
+    raw_id: Any,
+) -> str:
+    if raw_id is not None and str(raw_id).strip():
+        return str(raw_id).strip()
+
+    payload = {
+        "exchange": exchange,
+        "symbol": symbol,
+        "timestamp": timestamp.isoformat(),
+        "side": side,
+        "price": str(price),
+        "amount": str(amount),
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def normalize_trade_batch(
+    batch: RawTradeBatch,
+    *,
+    raw_checksum: str,
+    now: datetime | None = None,
+) -> list[NormalizedTrade]:
+    available_at = (now or utc_now()).astimezone(UTC)
+    parsed_rows: list[tuple[datetime, str, NormalizedTrade]] = []
+    trade_ids: list[str] = []
+
+    for index, row in enumerate(batch.rows):
+        timestamp = parse_trade_timestamp(row)
+        if timestamp > available_at:
+            raise MarketDataError("future trades are not accepted")
+
+        price = decimal_from_raw(row.get("price"), field_name="price")
+        amount = decimal_from_raw(row.get("amount"), field_name="amount")
+        validate_trade_values(price=price, amount=amount)
+        side = normalize_trade_side(row.get("side"))
+        trade_id = deterministic_trade_id(
+            exchange=batch.exchange,
+            symbol=batch.symbol,
+            timestamp=timestamp,
+            side=side,
+            price=price,
+            amount=amount,
+            raw_id=row.get("id"),
+        )
+        trade_ids.append(trade_id)
+        try:
+            trade = NormalizedTrade(
+                exchange=batch.exchange,
+                symbol=batch.symbol,
+                trade_id=trade_id,
+                timestamp=timestamp,
+                side=side,
+                price=price,
+                amount=amount,
+                available_at=available_at,
+                raw_checksum=raw_checksum,
+            )
+        except ValueError as exc:
+            raise MarketDataError(f"invalid trade row {index}: {exc}") from exc
+        parsed_rows.append((timestamp, trade_id, trade))
+
+    duplicates = detect_duplicate_values(trade_ids)
+    if duplicates:
+        joined = ", ".join(duplicates)
+        raise MarketDataError(f"duplicate trade ids: {joined}")
+
+    return [
+        trade
+        for _, _, trade in sorted(parsed_rows, key=lambda item: (item[0], item[1], item[2].side))
+    ]
+
+
+def deterministic_trade_dataset_hash(trades: list[NormalizedTrade]) -> str:
+    digest = hashlib.sha256()
+    for trade in sorted(trades, key=lambda item: (item.symbol, item.timestamp, item.trade_id)):
+        line = "|".join(
+            [
+                trade.exchange,
+                trade.symbol,
+                trade.trade_id,
+                trade.timestamp.isoformat(),
+                trade.side,
+                str(trade.price),
+                str(trade.amount),
+                trade.available_at.isoformat(),
+                trade.raw_checksum,
             ]
         )
         digest.update(line.encode("utf-8"))

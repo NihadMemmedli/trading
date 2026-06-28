@@ -7,7 +7,7 @@ from types import ModuleType
 import pytest
 
 from trading.data.adapters import PublicMarketDataAdapter
-from trading.data.market import MarketDataError, OhlcvRequest
+from trading.data.market import MarketDataError, OhlcvRequest, TradeRequest
 
 
 class FakeExchange:
@@ -30,6 +30,31 @@ class FakeExchange:
         assert since is None
         assert limit == 5
         return [["2026-01-01T00:00:00Z", "1", "2", "1", "2", "10"]]
+
+    def fetch_trades(
+        self,
+        symbol: str,
+        *,
+        since: int | None,
+        limit: int,
+    ) -> list[dict[str, object]]:
+        assert symbol == "BTC/USDT"
+        assert since is None
+        assert limit == 5
+        assert "apiKey" not in self.config
+        assert "secret" not in self.config
+        return [
+            {
+                "id": "trade-1",
+                "timestamp": 1767225605000,
+                "side": "buy",
+                "price": "42001.10",
+                "amount": "0.125",
+            }
+        ]
+
+    def private_post_order(self) -> None:
+        raise AssertionError("private methods must not be used")
 
 
 def test_public_adapter_lazily_uses_only_fetch_ohlcv(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -57,6 +82,27 @@ def test_public_adapter_requires_spot_market(monkeypatch: pytest.MonkeyPatch) ->
     adapter = PublicMarketDataAdapter("binance")
     with pytest.raises(MarketDataError, match="public spot"):
         adapter.fetch_ohlcv(OhlcvRequest(symbol="BTC/USDT", timeframe="1m", limit=5))
+
+
+def test_public_adapter_lazily_uses_only_fetch_trades(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_ccxt = ModuleType("ccxt")
+    fake_ccxt.binance = FakeExchange  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "ccxt", fake_ccxt)
+
+    adapter = PublicMarketDataAdapter("binance")
+    batch = adapter.fetch_trades(TradeRequest(symbol="BTC/USDT", limit=5))
+
+    assert batch.exchange == "binance"
+    assert batch.rows == [
+        {
+            "id": "trade-1",
+            "timestamp": 1767225605000,
+            "side": "buy",
+            "price": "42001.10",
+            "amount": "0.125",
+        }
+    ]
+    assert adapter._load_client().config == {"enableRateLimit": True}  # type: ignore[attr-defined]
 
 
 def test_public_adapter_rejects_unsupported_exchange() -> None:
@@ -95,3 +141,41 @@ def test_public_adapter_applies_until_bound(monkeypatch: pytest.MonkeyPatch) -> 
     )
 
     assert len(batch.rows) == 2
+
+
+def test_public_adapter_applies_trade_until_bound(monkeypatch: pytest.MonkeyPatch) -> None:
+    class BoundedExchange(FakeExchange):
+        def fetch_trades(
+            self,
+            symbol: str,
+            *,
+            since: int | None,
+            limit: int,
+        ) -> list[dict[str, object]]:
+            return [
+                {"id": "1", "timestamp": 1767225600000, "side": "buy", "price": "1", "amount": "1"},
+                {
+                    "id": "2",
+                    "timestamp": None,
+                    "datetime": "2026-01-01T00:01:00Z",
+                    "side": "sell",
+                    "price": "2",
+                    "amount": "1",
+                },
+                {"id": "3", "timestamp": 1767225720000, "side": "buy", "price": "3", "amount": "1"},
+            ]
+
+    fake_ccxt = ModuleType("ccxt")
+    fake_ccxt.binance = BoundedExchange  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "ccxt", fake_ccxt)
+
+    adapter = PublicMarketDataAdapter("binance")
+    batch = adapter.fetch_trades(
+        TradeRequest(
+            symbol="BTC/USDT",
+            limit=5,
+            until=datetime(2026, 1, 1, 0, 2, tzinfo=UTC),
+        )
+    )
+
+    assert [row["id"] for row in batch.rows] == ["1", "2"]

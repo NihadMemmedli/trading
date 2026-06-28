@@ -180,3 +180,32 @@ class Candle(Base):
     )
 
     pair: Mapped[TradingPair] = relationship()
+
+
+class Trade(Base):
+    __tablename__ = "trades"
+    __table_args__ = (
+        CheckConstraint("side IN ('buy', 'sell')", name="trade_side_valid"),
+        CheckConstraint("price >= 0", name="trade_price_nonnegative"),
+        CheckConstraint("amount >= 0", name="trade_amount_nonnegative"),
+        Index("ix_trades_pair_source_trade_id", "pair_id", "source", "trade_id"),
+        Index("ix_trades_pair_source_timestamp", "pair_id", "source", "timestamp"),
+        Index("ix_trades_pit_replay", "pair_id", "source", "available_at", "timestamp"),
+        Index("ix_trades_available_at", "available_at"),
+    )
+
+    pair_id: Mapped[int] = mapped_column(ForeignKey("trading_pairs.id"), primary_key=True)
+    source: Mapped[str] = mapped_column(String(64), primary_key=True)
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
+    trade_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    side: Mapped[str] = mapped_column(String(8), nullable=False)
+    price: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    raw_checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    quality_flags: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    inserted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    pair: Mapped[TradingPair] = relationship()

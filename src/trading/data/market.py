@@ -1,4 +1,4 @@
-"""Public OHLCV request and candle DTOs."""
+"""Public market-data request and normalized DTOs."""
 
 from __future__ import annotations
 
@@ -124,6 +124,47 @@ class OhlcvRequest(BaseModel):
         return self
 
 
+class TradeRequest(BaseModel):
+    """Request for public spot trade data."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    exchange: str = Field(default="binance", min_length=1, max_length=64)
+    symbol: str
+    since: datetime | None = None
+    until: datetime | None = None
+    limit: int = Field(default=500, ge=1, le=1000)
+
+    @field_validator("exchange")
+    @classmethod
+    def normalize_exchange(cls, value: str) -> str:
+        exchange = value.strip().lower()
+        if exchange != "binance":
+            raise ValueError("only binance public spot trades are supported in this phase")
+        return exchange
+
+    @field_validator("symbol")
+    @classmethod
+    def validate_request_symbol(cls, value: str) -> str:
+        return validate_symbol(value)
+
+    @field_validator("since", "until")
+    @classmethod
+    def validate_datetime(cls, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        parsed = require_utc(value, field_name="datetime")
+        if parsed > utc_now():
+            raise ValueError("timestamp cannot be in the future")
+        return parsed
+
+    @model_validator(mode="after")
+    def validate_range(self) -> TradeRequest:
+        if self.since is not None and self.until is not None and self.since >= self.until:
+            raise ValueError("since must be earlier than until")
+        return self
+
+
 class RawOhlcvBatch(BaseModel):
     """Raw public OHLCV rows as returned by an exchange adapter."""
 
@@ -144,6 +185,27 @@ class RawOhlcvBatch(BaseModel):
     @classmethod
     def validate_batch_timeframe(cls, value: str) -> str:
         return validate_timeframe(value)
+
+    @field_validator("fetched_at")
+    @classmethod
+    def validate_fetched_at(cls, value: datetime) -> datetime:
+        return require_utc(value, field_name="fetched_at")
+
+
+class RawTradeBatch(BaseModel):
+    """Raw public trade rows as returned by an exchange adapter."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    exchange: str
+    symbol: str
+    rows: list[dict[str, Any]]
+    fetched_at: datetime = Field(default_factory=utc_now)
+
+    @field_validator("symbol")
+    @classmethod
+    def validate_batch_symbol(cls, value: str) -> str:
+        return validate_symbol(value)
 
     @field_validator("fetched_at")
     @classmethod
@@ -195,6 +257,52 @@ class NormalizedCandle(BaseModel):
             raise ValueError("high must be at least open, close, and low")
         if self.low > min(self.open, self.close, self.high):
             raise ValueError("low must be at most open, close, and high")
+        if self.available_at < self.timestamp:
+            raise ValueError("available_at cannot be earlier than timestamp")
+        return self
+
+
+class NormalizedTrade(BaseModel):
+    """Normalized public trade ready for persistence."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    exchange: str
+    symbol: str
+    trade_id: str = Field(min_length=1, max_length=128)
+    timestamp: datetime
+    side: str
+    price: Decimal
+    amount: Decimal
+    available_at: datetime
+    raw_checksum: str
+    quality_flags: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("symbol")
+    @classmethod
+    def validate_trade_symbol(cls, value: str) -> str:
+        return validate_symbol(value)
+
+    @field_validator("side")
+    @classmethod
+    def validate_side(cls, value: str) -> str:
+        side = value.strip().lower()
+        if side not in {"buy", "sell"}:
+            raise ValueError("trade side must be buy or sell")
+        return side
+
+    @field_validator("timestamp", "available_at")
+    @classmethod
+    def validate_trade_datetime(cls, value: datetime) -> datetime:
+        parsed = require_utc(value, field_name="trade timestamp")
+        if parsed > utc_now():
+            raise ValueError("trade timestamp cannot be in the future")
+        return parsed
+
+    @model_validator(mode="after")
+    def validate_trade_values(self) -> NormalizedTrade:
+        if min(self.price, self.amount) < Decimal("0"):
+            raise ValueError("trade price and amount must be nonnegative")
         if self.available_at < self.timestamp:
             raise ValueError("available_at cannot be earlier than timestamp")
         return self

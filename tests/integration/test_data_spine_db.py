@@ -11,10 +11,10 @@ from sqlalchemy.exc import OperationalError
 
 from alembic import command
 from trading.core.settings import Settings
-from trading.data.market import IngestionStatus, OhlcvRequest, RawOhlcvBatch
-from trading.data.quality import normalize_ohlcv_batch
+from trading.data.market import IngestionStatus, OhlcvRequest, RawOhlcvBatch, RawTradeBatch
+from trading.data.quality import normalize_ohlcv_batch, normalize_trade_batch
 from trading.db.session import create_db_engine, create_session_factory
-from trading.services.ingestion import DuplicateCandleError, IngestionService
+from trading.services.ingestion import DuplicateCandleError, DuplicateTradeError, IngestionService
 from trading.services.ingestion_worker import OhlcvIngestionWorker
 
 pytestmark = pytest.mark.integration
@@ -76,9 +76,15 @@ def test_alembic_timescale_candles_and_point_in_time_queries() -> None:
                 "WHERE table_name = 'candles'"
             )
         ).scalar_one()
+        trades_hypertable = connection.execute(
+            sa.text(
+                "SELECT table_name FROM _timescaledb_catalog.hypertable WHERE table_name = 'trades'"
+            )
+        ).scalar_one()
 
     assert extension == "timescaledb"
     assert hypertable == "candles"
+    assert trades_hypertable == "trades"
 
     service = IngestionService(create_session_factory(engine))
     batch = RawOhlcvBatch(
@@ -133,6 +139,59 @@ def test_alembic_timescale_candles_and_point_in_time_queries() -> None:
     assert [candle.close for candle in bounded_replay] == [Decimal("110")]
     assert missing_pair == []
 
+    trade_batch = RawTradeBatch(
+        exchange="binance",
+        symbol="ETH/USDT",
+        rows=[
+            {
+                "id": "eth-trade-1",
+                "timestamp": "2026-06-01T00:00:10Z",
+                "side": "buy",
+                "price": "105.50",
+                "amount": "1.25",
+            },
+            {
+                "id": "eth-trade-2",
+                "timestamp": "2026-06-01T00:01:10Z",
+                "side": "sell",
+                "price": "110.25",
+                "amount": "0.75",
+            },
+        ],
+    )
+    trades = normalize_trade_batch(
+        trade_batch,
+        raw_checksum="integration-trades",
+        now=datetime(2026, 6, 1, 1, 0, tzinfo=UTC),
+    )
+
+    assert service.insert_trades(trades) == 2
+    with pytest.raises(DuplicateTradeError):
+        service.insert_trades(trades)
+
+    before_trades_available = service.point_in_time_trades(
+        exchange="binance",
+        symbol="ETH/USDT",
+        decision_time=datetime(2026, 6, 1, 0, 30, tzinfo=UTC),
+    )
+    bounded_trade_replay = service.point_in_time_trades(
+        exchange="binance",
+        symbol="ETH/USDT",
+        decision_time=datetime(2026, 6, 1, 1, 0, tzinfo=UTC),
+        start_time=datetime(2026, 6, 1, 0, 1, tzinfo=UTC),
+        end_time=datetime(2026, 6, 1, 0, 2, tzinfo=UTC),
+        source="binance",
+    )
+    missing_trade_pair = service.point_in_time_trades(
+        exchange="binance",
+        symbol="BTC/USDT",
+        decision_time=datetime(2026, 6, 1, 1, 0, tzinfo=UTC),
+    )
+
+    assert before_trades_available == []
+    assert [trade.trade_id for trade in bounded_trade_replay] == ["eth-trade-2"]
+    assert missing_trade_pair == []
+
     with engine.begin() as connection:
         btc_pair_count = connection.execute(
             sa.text("SELECT count(*) FROM trading_pairs WHERE symbol = 'BTC/USDT'")
@@ -143,9 +202,16 @@ def test_alembic_timescale_candles_and_point_in_time_queries() -> None:
                 "WHERE tablename = 'candles' AND indexname = 'ix_candles_pit_replay'"
             )
         ).scalar_one()
+        trade_pit_index = connection.execute(
+            sa.text(
+                "SELECT indexname FROM pg_indexes "
+                "WHERE tablename = 'trades' AND indexname = 'ix_trades_pit_replay'"
+            )
+        ).scalar_one()
 
     assert btc_pair_count == 0
     assert pit_index == "ix_candles_pit_replay"
+    assert trade_pit_index == "ix_trades_pit_replay"
 
     command.downgrade(config, "base")
     command.upgrade(config, "head")
