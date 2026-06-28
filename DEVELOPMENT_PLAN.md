@@ -43,7 +43,7 @@ Exit criteria:
 
 ## Phase 2: Data Foundation
 
-Status: in progress. Public OHLCV, public trade, public top-20 order book ingestion primitives, Binance public spot provider registry metadata, research-only funding/derivatives metric interfaces, raw archive writes, normalized candle, trade, order book, and derivatives metric persistence, point-in-time candle, trade, order book, and derivatives metric reads, and deterministic offline fixtures are implemented for the MVP symbol universe.
+Status: complete as of commit `6b476e2`. Public OHLCV, public trade, public top-20 order book ingestion primitives, Binance public spot provider registry metadata, research-only funding/derivatives metric interfaces, raw archive writes, normalized candle, trade, order book, and derivatives metric persistence, point-in-time candle, trade, order book, and derivatives metric reads, and deterministic offline fixtures are implemented for the MVP symbol universe.
 
 Deliverables:
 
@@ -60,9 +60,11 @@ Exit criteria:
 - Backtests can load deterministic historical candle, trade, and order book snapshot data without network access.
 - Data quality failures for timestamps, duplicates, gaps, invalid OHLCV ranges, malformed trade sides, invalid trade values, malformed order books, malformed derivatives metrics, and symbols are explicit and test-covered.
 - UTC timestamp validation, duplicate candle, trade, order book, and derivatives metric constraints, bounded point-in-time reads, and point-in-time indexes are tested.
-- Remaining before Phase 2 completion: final review and commit of the data foundation slices.
+- Final data foundation review, checks, and commit are complete.
 
 ## Phase 3: Research and Backtesting
+
+Status: in progress. The first slice adds a candle-only deterministic strategy interface, moving-average crossover benchmark, next-candle backtest runner, fee/slippage accounting, point-in-time data cutoff, and dataset/config/result hashes.
 
 Deliverables:
 

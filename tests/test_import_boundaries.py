@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import ast
 import importlib
 import inspect
 import pkgutil
+from pathlib import Path
 
 import trading
 from trading.data.adapters import PublicMarketDataAdapter
@@ -99,5 +101,33 @@ def test_provider_registry_metadata_exposes_no_execution_or_private_credentials(
             "margin",
             "futures",
             "private",
+        )
+    )
+
+
+def test_backtesting_and_strategy_modules_import_no_execution_or_private_runtime() -> None:
+    source_roots = (Path("src/trading/backtesting"), Path("src/trading/strategies"))
+    imported_modules: list[str] = []
+    for source_root in source_roots:
+        for path in source_root.glob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    imported_modules.extend(alias.name for alias in node.names)
+                if isinstance(node, ast.ImportFrom) and node.module is not None:
+                    imported_modules.append(node.module)
+
+    assert not any(
+        fragment in module_name.lower()
+        for module_name in imported_modules
+        for fragment in (
+            "execution",
+            "broker",
+            "custody",
+            "wallet",
+            "ccxt",
+            "private",
+            "margin",
+            "futures",
         )
     )
