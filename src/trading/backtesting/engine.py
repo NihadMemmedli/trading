@@ -9,7 +9,13 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from trading.data.market import MarketDataError, NormalizedCandle, require_utc, validate_timeframe
+from trading.data.market import (
+    MarketDataError,
+    NormalizedCandle,
+    require_exact_utc,
+    require_utc,
+    validate_timeframe,
+)
 from trading.strategies import CandleStrategy, StrategyParameters
 
 BPS_DENOMINATOR = Decimal("10000")
@@ -70,6 +76,19 @@ class EquityPoint:
 
 
 @dataclass(frozen=True)
+class BacktestMetrics:
+    trades_count: int
+    final_equity: Decimal
+    total_return: Decimal
+    max_drawdown: Decimal
+    fees_paid: Decimal
+    turnover: Decimal
+    average_exposure: Decimal
+    benchmark_total_return: Decimal
+    excess_return: Decimal
+
+
+@dataclass(frozen=True)
 class BacktestResult:
     config_hash: str
     dataset_hash: str
@@ -79,8 +98,29 @@ class BacktestResult:
     total_return: Decimal
     max_drawdown: Decimal
     fees_paid: Decimal
+    metrics: BacktestMetrics
     trades: tuple[BacktestTrade, ...]
     equity_curve: tuple[EquityPoint, ...]
+
+
+@dataclass(frozen=True)
+class BacktestReport:
+    report_hash: str
+    config_hash: str
+    dataset_hash: str
+    result_hash: str
+    strategy_name: str
+    strategy_parameters: StrategyParameters
+    symbol: str
+    timeframe: str
+    start: datetime
+    end: datetime
+    decision_time: datetime
+    fee_bps: Decimal
+    slippage_bps: Decimal
+    initial_capital: Decimal
+    metrics: BacktestMetrics
+    generated_at: datetime
 
 
 def run_candle_backtest(
@@ -107,6 +147,7 @@ def run_candle_backtest(
     slippage_rate = config.slippage_bps / BPS_DENOMINATOR
     trades: list[BacktestTrade] = []
     equity_curve: list[EquityPoint] = []
+    exposures: list[Decimal] = []
 
     for index, candle in enumerate(filtered_candles):
         cash, position, trade = _rebalance_to_target(
@@ -122,6 +163,8 @@ def run_candle_backtest(
 
         equity = cash + position * candle.close
         equity_curve.append(EquityPoint(timestamp=candle.timestamp, equity=equity))
+        position_market_value = abs(position * candle.close)
+        exposures.append(Decimal("0") if equity == Decimal("0") else position_market_value / equity)
 
         history = filtered_candles[: index + 1]
         signal = strategy.on_candle(candle=candle, history=history)
@@ -135,15 +178,29 @@ def run_candle_backtest(
 
     final_equity = equity_curve[-1].equity
     config_hash = deterministic_config_hash(config)
+    total_return = (final_equity - config.initial_capital) / config.initial_capital
+    benchmark_total_return = _benchmark_total_return(filtered_candles)
+    metrics = BacktestMetrics(
+        trades_count=len(trades),
+        final_equity=final_equity,
+        total_return=total_return,
+        max_drawdown=_max_drawdown(equity_curve),
+        fees_paid=sum((trade.fee for trade in trades), Decimal("0")),
+        turnover=_turnover(trades, config.initial_capital),
+        average_exposure=sum(exposures, Decimal("0")) / Decimal(len(exposures)),
+        benchmark_total_return=benchmark_total_return,
+        excess_return=total_return - benchmark_total_return,
+    )
     result = BacktestResult(
         config_hash=config_hash,
         dataset_hash=dataset_hash,
         result_hash="",
-        trades_count=len(trades),
-        final_equity=final_equity,
-        total_return=(final_equity - config.initial_capital) / config.initial_capital,
-        max_drawdown=_max_drawdown(equity_curve),
-        fees_paid=sum((trade.fee for trade in trades), Decimal("0")),
+        trades_count=metrics.trades_count,
+        final_equity=metrics.final_equity,
+        total_return=metrics.total_return,
+        max_drawdown=metrics.max_drawdown,
+        fees_paid=metrics.fees_paid,
+        metrics=metrics,
         trades=tuple(trades),
         equity_curve=tuple(equity_curve),
     )
@@ -156,8 +213,66 @@ def run_candle_backtest(
         total_return=result.total_return,
         max_drawdown=result.max_drawdown,
         fees_paid=result.fees_paid,
+        metrics=result.metrics,
         trades=result.trades,
         equity_curve=result.equity_curve,
+    )
+
+
+def build_backtest_report(
+    result: BacktestResult,
+    config: BacktestConfig,
+    generated_at: datetime,
+) -> BacktestReport:
+    """Build a reproducible report from a completed deterministic backtest."""
+
+    normalized_generated_at = require_exact_utc(generated_at, field_name="generated_at")
+    report = BacktestReport(
+        report_hash="",
+        config_hash=result.config_hash,
+        dataset_hash=result.dataset_hash,
+        result_hash=result.result_hash,
+        strategy_name=config.strategy_name,
+        strategy_parameters=config.strategy_parameters,
+        symbol=config.symbol,
+        timeframe=config.timeframe,
+        start=config.start,
+        end=config.end,
+        decision_time=config.decision_time,
+        fee_bps=config.fee_bps,
+        slippage_bps=config.slippage_bps,
+        initial_capital=config.initial_capital,
+        metrics=result.metrics,
+        generated_at=normalized_generated_at,
+    )
+    return BacktestReport(
+        report_hash=_sha256_json(_report_payload(report, include_report_hash=False)),
+        config_hash=report.config_hash,
+        dataset_hash=report.dataset_hash,
+        result_hash=report.result_hash,
+        strategy_name=report.strategy_name,
+        strategy_parameters=report.strategy_parameters,
+        symbol=report.symbol,
+        timeframe=report.timeframe,
+        start=report.start,
+        end=report.end,
+        decision_time=report.decision_time,
+        fee_bps=report.fee_bps,
+        slippage_bps=report.slippage_bps,
+        initial_capital=report.initial_capital,
+        metrics=report.metrics,
+        generated_at=report.generated_at,
+    )
+
+
+def export_backtest_report_json(report: BacktestReport) -> str:
+    """Export a report as stable sorted JSON with temporal and decimal strings."""
+
+    return json.dumps(
+        _report_payload(report, include_report_hash=True),
+        sort_keys=True,
+        separators=(",", ":"),
+        default=_json_default,
     )
 
 
@@ -181,11 +296,7 @@ def deterministic_result_hash(result: BacktestResult) -> str:
     payload = {
         "config_hash": result.config_hash,
         "dataset_hash": result.dataset_hash,
-        "trades_count": result.trades_count,
-        "final_equity": result.final_equity,
-        "total_return": result.total_return,
-        "max_drawdown": result.max_drawdown,
-        "fees_paid": result.fees_paid,
+        "metrics": _metrics_payload(result.metrics),
         "trades": [
             {
                 "symbol": trade.symbol,
@@ -203,6 +314,43 @@ def deterministic_result_hash(result: BacktestResult) -> str:
         ],
     }
     return _sha256_json(payload)
+
+
+def _metrics_payload(metrics: BacktestMetrics) -> dict[str, Any]:
+    return {
+        "trades_count": metrics.trades_count,
+        "final_equity": metrics.final_equity,
+        "total_return": metrics.total_return,
+        "max_drawdown": metrics.max_drawdown,
+        "fees_paid": metrics.fees_paid,
+        "turnover": metrics.turnover,
+        "average_exposure": metrics.average_exposure,
+        "benchmark_total_return": metrics.benchmark_total_return,
+        "excess_return": metrics.excess_return,
+    }
+
+
+def _report_payload(report: BacktestReport, *, include_report_hash: bool) -> dict[str, Any]:
+    payload = {
+        "config_hash": report.config_hash,
+        "dataset_hash": report.dataset_hash,
+        "result_hash": report.result_hash,
+        "strategy_name": report.strategy_name,
+        "strategy_parameters": dict(report.strategy_parameters),
+        "symbol": report.symbol,
+        "timeframe": report.timeframe,
+        "start": report.start,
+        "end": report.end,
+        "decision_time": report.decision_time,
+        "fee_bps": report.fee_bps,
+        "slippage_bps": report.slippage_bps,
+        "initial_capital": report.initial_capital,
+        "metrics": _metrics_payload(report.metrics),
+        "generated_at": report.generated_at,
+    }
+    if include_report_hash:
+        payload["report_hash"] = report.report_hash
+    return payload
 
 
 def _select_replay_candles(
@@ -292,6 +440,21 @@ def _max_drawdown(equity_curve: list[EquityPoint]) -> Decimal:
             if drawdown > max_drawdown:
                 max_drawdown = drawdown
     return max_drawdown
+
+
+def _turnover(trades: list[BacktestTrade], initial_capital: Decimal) -> Decimal:
+    traded_notional = sum(
+        (trade.quantity * trade.fill_price for trade in trades),
+        Decimal("0"),
+    )
+    return traded_notional / initial_capital
+
+
+def _benchmark_total_return(candles: tuple[NormalizedCandle, ...]) -> Decimal:
+    first_close = candles[0].close
+    if first_close == Decimal("0"):
+        raise MarketDataError("benchmark requires positive first candle close")
+    return (candles[-1].close - first_close) / first_close
 
 
 def _sha256_json(payload: dict[str, Any]) -> str:

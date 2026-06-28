@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
 
-from trading.backtesting import BacktestConfig, run_candle_backtest
+from trading.backtesting import (
+    BacktestConfig,
+    build_backtest_report,
+    export_backtest_report_json,
+    run_candle_backtest,
+)
 from trading.data.market import NormalizedCandle
 from trading.strategies import MovingAverageCrossoverStrategy, StrategyParameters, StrategySignal
 
@@ -100,6 +106,34 @@ class AlwaysLongStrategy:
         )
 
 
+class ScheduledTargetStrategy:
+    def __init__(self, targets: Sequence[str]) -> None:
+        self._targets = tuple(Decimal(target) for target in targets)
+        self._index = 0
+
+    @property
+    def name(self) -> str:
+        return "scheduled_target"
+
+    @property
+    def parameters(self) -> StrategyParameters:
+        return {"targets": ",".join(str(target) for target in self._targets)}
+
+    def on_candle(
+        self,
+        *,
+        candle: NormalizedCandle,
+        history: Sequence[NormalizedCandle],
+    ) -> StrategySignal:
+        target = self._targets[self._index]
+        self._index += 1
+        return StrategySignal(
+            symbol=candle.symbol,
+            timestamp=candle.timestamp,
+            target_position=target,
+        )
+
+
 def test_backtest_accounts_for_fee_and_slippage_on_next_candle_open() -> None:
     candles = (
         make_candle(0, open_="100", close="100"),
@@ -129,6 +163,36 @@ def test_backtest_accounts_for_fee_and_slippage_on_next_candle_open() -> None:
     assert result.fees_paid == expected_fee
     assert result.final_equity == expected_final_equity
     assert result.max_drawdown == (Decimal("1000") - expected_final_equity) / Decimal("1000")
+    assert result.metrics.trades_count == result.trades_count
+    assert result.metrics.final_equity == result.final_equity
+    assert result.metrics.total_return == result.total_return
+    assert result.metrics.max_drawdown == result.max_drawdown
+    assert result.metrics.fees_paid == result.fees_paid
+
+
+def test_backtest_calculates_turnover_exposure_benchmark_and_excess_return() -> None:
+    strategy = ScheduledTargetStrategy(("1", "0", "0"))
+    candles = (
+        make_candle(0, open_="100", close="100"),
+        make_candle(1, open_="100", close="100"),
+        make_candle(2, open_="200", close="200"),
+    )
+
+    result = run_candle_backtest(
+        candles=candles,
+        dataset_hash="dataset-a",
+        config=make_config(
+            strategy_name=strategy.name,
+            strategy_parameters=strategy.parameters,
+        ),
+        strategy=strategy,
+    )
+
+    assert result.trades_count == 2
+    assert result.metrics.turnover == Decimal("3")
+    assert result.metrics.average_exposure == Decimal("1") / Decimal("3")
+    assert result.metrics.benchmark_total_return == Decimal("1")
+    assert result.metrics.excess_return == Decimal("0")
 
 
 def test_same_dataset_and_config_produce_same_result_hash() -> None:
@@ -159,6 +223,70 @@ def test_same_dataset_and_config_produce_same_result_hash() -> None:
     assert first.config_hash == second.config_hash
     assert first.result_hash == second.result_hash
     assert len(first.result_hash) == 64
+
+
+def test_backtest_report_export_is_reproducible_with_explicit_generated_at() -> None:
+    generated_at = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
+    first_strategy = MovingAverageCrossoverStrategy(short_window=1, long_window=2)
+    second_strategy = MovingAverageCrossoverStrategy(short_window=1, long_window=2)
+    config = make_config(
+        strategy_name=first_strategy.name,
+        strategy_parameters=first_strategy.parameters,
+    )
+    candles = (
+        make_candle(0, open_="100", close="100"),
+        make_candle(1, open_="101", close="102"),
+        make_candle(2, open_="103", close="104"),
+    )
+
+    first_result = run_candle_backtest(
+        candles=candles,
+        dataset_hash="dataset-a",
+        config=config,
+        strategy=first_strategy,
+    )
+    second_result = run_candle_backtest(
+        candles=tuple(reversed(candles)),
+        dataset_hash="dataset-a",
+        config=config,
+        strategy=second_strategy,
+    )
+    first_report = build_backtest_report(first_result, config, generated_at)
+    second_report = build_backtest_report(second_result, config, generated_at)
+
+    first_json = export_backtest_report_json(first_report)
+    second_json = export_backtest_report_json(second_report)
+    decoded = json.loads(first_json)
+
+    assert first_report.report_hash == second_report.report_hash
+    assert first_json == second_json
+    assert decoded["report_hash"] == first_report.report_hash
+    assert decoded["metrics"]["final_equity"] == str(first_result.final_equity)
+    assert decoded["generated_at"] == generated_at.isoformat()
+
+
+@pytest.mark.parametrize(
+    "generated_at",
+    [
+        datetime(2026, 1, 2, 3, 4, 5),
+        datetime(2026, 1, 2, 7, 4, 5, tzinfo=timezone(timedelta(hours=4))),
+    ],
+)
+def test_backtest_report_requires_explicit_utc_generated_at(generated_at: datetime) -> None:
+    strategy = AlwaysLongStrategy()
+    config = make_config(strategy_name=strategy.name, strategy_parameters=strategy.parameters)
+    result = run_candle_backtest(
+        candles=(
+            make_candle(0, open_="100", close="100"),
+            make_candle(1, open_="100", close="100"),
+        ),
+        dataset_hash="dataset-a",
+        config=config,
+        strategy=strategy,
+    )
+
+    with pytest.raises(ValueError, match="generated_at must"):
+        build_backtest_report(result, config, generated_at)
 
 
 class RecordingStrategy:

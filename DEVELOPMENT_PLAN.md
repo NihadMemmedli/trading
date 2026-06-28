@@ -64,7 +64,7 @@ Exit criteria:
 
 ## Phase 3: Research and Backtesting
 
-Status: in progress. The first slice adds a candle-only deterministic strategy interface, moving-average crossover benchmark, next-candle backtest runner, fee/slippage accounting, point-in-time data cutoff, and dataset/config/result hashes.
+Status: in progress. The first slice adds a candle-only deterministic strategy interface, moving-average crossover benchmark, next-candle backtest runner, fee/slippage accounting, point-in-time data cutoff, and dataset/config/result hashes. The current checkpoint extends that spine with deterministic turnover, exposure, benchmark, excess-return metrics, and reproducible JSON experiment reports.
 
 Deliverables:
 
