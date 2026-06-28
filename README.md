@@ -2,7 +2,7 @@
 
 Greenfield research platform for crypto market data ingestion, strategy research, AI-assisted signal evaluation, backtesting, and paper-trading simulation.
 
-Current state: Phase 1 and Phase 2 are complete, Phase 3 has a reproducible candle-backtest spine, and the first Phase 4 AI signal contract slice is complete. The repository has its own local git history, a single runtime package, `trading`, FastAPI health/config/ingestion/dataset/backtest/agent-signal endpoints, safety-first settings validation, public OHLCV, trade, top-20 order book ingestion primitives, Binance public spot provider registry metadata, research-only funding/derivatives metric DTOs and storage primitives, raw Parquet archive support, Timescale-backed candle, trade, order book, derivatives metric, agent report, trade proposal, and risk decision storage, deterministic offline fixtures, synchronous persisted backtest runs, strategy metadata/version hashing, sizing controls, richer metrics, run events, tests, and local Postgres/TimescaleDB and Redis services. It still has no model pipeline, model orchestration, paper-trading signal loop, order execution, wallet, or custody code.
+Current state: Phase 1 and Phase 2 are complete, Phase 3 has a reproducible candle-backtest spine, and early Phase 4 feature/AI research slices are complete. The repository has its own local git history, a single runtime package, `trading`, FastAPI health/config/ingestion/dataset/backtest/feature-set/agent-signal endpoints, safety-first settings validation, public OHLCV, trade, top-20 order book ingestion primitives, Binance public spot provider registry metadata, research-only funding/derivatives metric DTOs and storage primitives, raw Parquet archive support, Timescale-backed candle, trade, order book, derivatives metric, feature row, agent report, trade proposal, and risk decision storage, deterministic offline fixtures, synchronous persisted backtest runs, strategy metadata/version hashing, sizing controls, richer metrics, run events, tests, and local Postgres/TimescaleDB and Redis services. It still has no model pipeline, model orchestration, paper-trading signal loop, order execution, wallet, or custody code.
 
 ## Safety Boundaries
 
@@ -158,6 +158,16 @@ The current Phase 4 slice persists validated research artifacts only:
 Analyst reports, trade proposals, and risk decisions must match strict schema versions before they are written. Invalid JSON shape, unknown enum values, non-finite numbers, bad selectors, schema version mismatches, or malformed long/flat proposal shapes are rejected before persistence. The records are stored in Postgres JSONB-backed tables created by Alembic migration `20260627_0011_ai_signal_contracts.py`.
 
 These endpoints do not submit orders, create execution events, call exchange private APIs, or run model orchestration. Model adapters, feature pipeline evaluation, paper-trading integration, and execution paths are deferred to later Phase 4 and Phase 5+ work.
+
+## Feature Set APIs
+
+The current feature slice supports deterministic candle-derived MVP features tied to explicit dataset IDs:
+
+- `POST /feature-sets`
+- `GET /feature-sets/{feature_set_id}`
+- `GET /feature-sets`
+
+Feature sets record dataset hash, feature set hash, parameter hash, code version, selector metadata, feature names, and low-volume JSONB feature rows. Materialization reads only candles with `available_at <= decision_time` and rejects registered dataset hashes that cannot be reproduced from point-in-time data.
 
 ## Configuration
 

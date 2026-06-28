@@ -110,6 +110,7 @@ def test_backtesting_and_strategy_modules_import_no_execution_or_private_runtime
         Path("src/trading/apps/api"),
         Path("src/trading/agents"),
         Path("src/trading/backtesting"),
+        Path("src/trading/features"),
         Path("src/trading/risk"),
         Path("src/trading/services"),
         Path("src/trading/strategies"),
