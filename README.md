@@ -2,7 +2,7 @@
 
 Greenfield research platform for crypto market data ingestion, strategy research, AI-assisted signal evaluation, backtesting, and paper-trading simulation.
 
-Current state: Phase 1 and Phase 2 are complete, Phase 3 has a reproducible candle-backtest spine, and early Phase 4 feature/AI research slices are complete. The repository has its own local git history, a single runtime package, `trading`, FastAPI health/config/ingestion/dataset/backtest/feature-set/agent-signal endpoints, safety-first settings validation, public OHLCV, trade, top-20 order book ingestion primitives, Binance public spot provider registry metadata, research-only funding/derivatives metric DTOs and storage primitives, raw Parquet archive support, Timescale-backed candle, trade, order book, derivatives metric, feature row, agent report, trade proposal, and risk decision storage, deterministic offline fixtures, synchronous persisted backtest runs, strategy metadata/version hashing, sizing controls, richer metrics, run events, tests, and local Postgres/TimescaleDB and Redis services. It still has no model pipeline, model orchestration, paper-trading signal loop, order execution, wallet, or custody code.
+Current state: Phase 1 and Phase 2 are complete, Phase 3 has a reproducible candle-backtest spine, and early Phase 4 feature/AI research slices are complete. The repository has its own local git history, a single runtime package, `trading`, FastAPI health/config/ingestion/dataset/backtest/feature-set/modeling/agent-signal endpoints, safety-first settings validation, public OHLCV, trade, top-20 order book ingestion primitives, Binance public spot provider registry metadata, research-only funding/derivatives metric DTOs and storage primitives, raw Parquet archive support, Timescale-backed candle, trade, order book, derivatives metric, feature row, split definition, model experiment, agent report, trade proposal, and risk decision storage, deterministic offline fixtures, synchronous persisted backtest runs, strategy metadata/version hashing, sizing controls, richer metrics, run events, tests, and local Postgres/TimescaleDB and Redis services. It still has no model adapters, training orchestration, paper-trading signal loop, order execution, wallet, or custody code.
 
 ## Safety Boundaries
 
@@ -168,6 +168,21 @@ The current feature slice supports deterministic candle-derived MVP features tie
 - `GET /feature-sets`
 
 Feature sets record dataset hash, feature set hash, parameter hash, code version, selector metadata, feature names, and low-volume JSONB feature rows. Materialization reads only candles with `available_at <= decision_time` and rejects registered dataset hashes that cannot be reproduced from point-in-time data.
+
+## Modeling Metadata APIs
+
+The model experiment spine records split definitions and experiment results tied to explicit `dataset_id` and `feature_set_id` lineage:
+
+- `POST /modeling/splits`
+- `GET /modeling/splits/{split_definition_id}`
+- `GET /modeling/splits`
+- `POST /modeling/experiments`
+- `GET /modeling/experiments/{experiment_id}`
+- `GET /modeling/experiments`
+
+Split definitions support holdout and walk-forward windows with `train`, `validation`, and `test` ranges. The service validates persisted feature rows for each window and rejects splits where rows are unavailable at the window `decision_time`. Experiment records store dataset ID, feature set ID, split definition ID, parameters, code version, metrics, status, timestamps, and deterministic lineage hashes.
+
+These endpoints persist metadata only. They do not train models, call model providers, orchestrate prompts, create paper-trading signals, or touch execution paths.
 
 ## Configuration
 
