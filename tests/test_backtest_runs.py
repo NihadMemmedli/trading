@@ -6,7 +6,12 @@ from decimal import Decimal
 import pytest
 from sqlalchemy.orm import sessionmaker
 
-from trading.services.backtests import BacktestRunRequest, BacktestService, build_backtest_strategy
+from trading.services.backtests import (
+    BacktestDatasetNotExecutableError,
+    BacktestRunRequest,
+    BacktestService,
+    build_backtest_strategy,
+)
 
 
 def test_build_backtest_strategy_supports_only_moving_average_crossover() -> None:
@@ -35,6 +40,44 @@ def test_build_backtest_strategy_rejects_malformed_parameters(
 ) -> None:
     with pytest.raises(ValueError):
         build_backtest_strategy("moving_average_crossover", parameters)
+
+
+def test_backtest_run_request_supports_dataset_id_mode_without_selector_fields() -> None:
+    request = BacktestRunRequest(
+        dataset_id=42,
+        generated_at=datetime(2026, 1, 2, tzinfo=UTC),
+        initial_capital=Decimal("1000"),
+        fee_bps=Decimal("1"),
+        slippage_bps=Decimal("2"),
+        strategy_name="moving_average_crossover",
+        strategy_parameters={"short_window": 1, "long_window": 2},
+    )
+
+    assert request.dataset_id == 42
+    assert request.exchange is None
+    assert request.symbol is None
+    assert request.timeframe is None
+    assert request.start is None
+    assert request.end is None
+    assert request.decision_time is None
+
+
+def test_backtest_service_rejects_dataset_id_mixed_with_exchange() -> None:
+    service = BacktestService(sessionmaker(), reports_dir="reports")
+
+    with pytest.raises(BacktestDatasetNotExecutableError, match="either dataset_id"):
+        service.run_backtest(
+            BacktestRunRequest(
+                dataset_id=42,
+                exchange="binance",
+                generated_at=datetime(2026, 1, 2, tzinfo=UTC),
+                initial_capital=Decimal("1000"),
+                fee_bps=Decimal("1"),
+                slippage_bps=Decimal("2"),
+                strategy_name="moving_average_crossover",
+                strategy_parameters={"short_window": 1, "long_window": 2},
+            )
+        )
 
 
 @pytest.mark.parametrize(

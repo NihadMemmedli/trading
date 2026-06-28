@@ -10,13 +10,19 @@ from fastapi.testclient import TestClient
 from trading.apps.api import create_app
 from trading.apps.api.dependencies import get_backtest_service
 from trading.core.settings import Settings
-from trading.services.backtests import BacktestRunNotFoundError
+from trading.services.backtests import (
+    BacktestDatasetNotExecutableError,
+    BacktestDatasetNotFoundError,
+    BacktestRunNotFoundError,
+)
 
 
 class FakeBacktestService:
     def __init__(self) -> None:
         self.run_id = uuid.UUID("00000000-0000-4000-8000-000000000011")
+        self.historical_run_id = uuid.UUID("00000000-0000-4000-8000-000000000013")
         self.created = datetime(2026, 1, 1, tzinfo=UTC)
+        self.requests: list[object] = []
 
     def _run(self, **overrides: object) -> SimpleNamespace:
         defaults = {
@@ -74,13 +80,22 @@ class FakeBacktestService:
         return SimpleNamespace(**defaults)
 
     def run_backtest(self, request) -> SimpleNamespace:  # noqa: ANN001
+        self.requests.append(request)
+        if request.dataset_id == 404:
+            raise BacktestDatasetNotFoundError(str(request.dataset_id))
+        if request.dataset_id == 422:
+            raise BacktestDatasetNotExecutableError("only backtest-created datasets are executable")
         return self._run(
-            exchange=request.exchange,
-            symbol=request.symbol,
-            timeframe=request.timeframe,
-            start=request.start,
-            end=request.end,
-            decision_time=request.decision_time,
+            dataset_id=getattr(request, "dataset_id", None) or 42,
+            exchange=getattr(request, "exchange", "binance") or "binance",
+            symbol=getattr(request, "symbol", "BTC/USDT") or "BTC/USDT",
+            timeframe=getattr(request, "timeframe", "1m") or "1m",
+            start=getattr(request, "start", datetime(2026, 1, 1, tzinfo=UTC))
+            or datetime(2026, 1, 1, tzinfo=UTC),
+            end=getattr(request, "end", datetime(2026, 1, 1, 0, 5, tzinfo=UTC))
+            or datetime(2026, 1, 1, 0, 5, tzinfo=UTC),
+            decision_time=getattr(request, "decision_time", datetime(2026, 1, 1, 1, tzinfo=UTC))
+            or datetime(2026, 1, 1, 1, tzinfo=UTC),
             generated_at=request.generated_at,
             initial_capital=request.initial_capital,
             fee_bps=request.fee_bps,
@@ -90,6 +105,14 @@ class FakeBacktestService:
         )
 
     def get_run(self, run_id: uuid.UUID) -> SimpleNamespace:
+        if run_id == self.historical_run_id:
+            return self._run(
+                id=self.historical_run_id,
+                dataset_id=None,
+                dataset_hash=None,
+                trades=[],
+                equity_points=[],
+            )
         if run_id != self.run_id:
             raise BacktestRunNotFoundError(str(run_id))
         return self._run()
@@ -98,9 +121,10 @@ class FakeBacktestService:
         return [self._run()][:limit]
 
 
-def client_with_fake_service() -> TestClient:
+def client_with_fake_service(service: FakeBacktestService | None = None) -> TestClient:
+    fake_service = service or FakeBacktestService()
     app = create_app(Settings(APP_ENV="test"))
-    app.dependency_overrides[get_backtest_service] = lambda: FakeBacktestService()
+    app.dependency_overrides[get_backtest_service] = lambda: fake_service
     return TestClient(app)
 
 
@@ -119,6 +143,24 @@ def valid_payload() -> dict[str, object]:
         "strategy_name": "moving_average_crossover",
         "strategy_parameters": {"short_window": 1, "long_window": 2},
     }
+
+
+def dataset_id_payload() -> dict[str, object]:
+    return {
+        "dataset_id": 42,
+        "generated_at": "2026-01-02T00:00:00Z",
+        "initial_capital": "1000",
+        "fee_bps": "1",
+        "slippage_bps": "2",
+        "strategy_name": "moving_average_crossover",
+        "strategy_parameters": {"short_window": 1, "long_window": 2},
+    }
+
+
+def dataset_id_payload_with(dataset_id: int) -> dict[str, object]:
+    payload = dataset_id_payload()
+    payload["dataset_id"] = dataset_id
+    return payload
 
 
 def test_create_backtest_run_returns_persisted_response() -> None:
@@ -161,6 +203,33 @@ def test_create_backtest_run_returns_persisted_response() -> None:
     assert body["artifact_path"] == "/reports/report.json"
 
 
+def test_create_backtest_run_accepts_dataset_id_mode() -> None:
+    service = FakeBacktestService()
+
+    with client_with_fake_service(service) as client:
+        response = client.post("/backtests/runs", json=dataset_id_payload())
+
+    assert response.status_code == 200
+    assert response.json()["dataset_id"] == 42
+    assert len(service.requests) == 1
+    request = service.requests[0]
+    assert request.dataset_id == 42
+    assert request.exchange is None
+    assert getattr(request, "symbol", None) is None
+    assert getattr(request, "start", None) is None
+
+
+def test_create_backtest_run_maps_dataset_id_errors() -> None:
+    with client_with_fake_service() as client:
+        missing_response = client.post("/backtests/runs", json=dataset_id_payload_with(404))
+        unsupported_response = client.post("/backtests/runs", json=dataset_id_payload_with(422))
+
+    assert missing_response.status_code == 404
+    assert missing_response.json()["detail"] == "dataset not found"
+    assert unsupported_response.status_code == 422
+    assert "backtest-created" in unsupported_response.json()["detail"]
+
+
 def test_get_backtest_run_returns_expanded_details_and_list_stays_summary_only() -> None:
     with client_with_fake_service() as client:
         get_response = client.get("/backtests/runs/00000000-0000-4000-8000-000000000011")
@@ -185,19 +254,47 @@ def test_get_backtest_run_returns_expanded_details_and_list_stays_summary_only()
     assert "equity_curve" not in list_body["runs"][0]
 
 
+def test_get_backtest_run_serializes_historical_run_without_dataset_id() -> None:
+    with client_with_fake_service() as client:
+        response = client.get("/backtests/runs/00000000-0000-4000-8000-000000000013")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["dataset_id"] is None
+    assert body["dataset_hash"] is None
+    assert body["trades"] == []
+    assert body["equity_curve"] == []
+
+
 def test_backtest_request_rejects_order_like_fields_and_non_utc_generated_at() -> None:
     order_payload = valid_payload()
     order_payload["side"] = "buy"
-    dataset_payload = valid_payload()
-    dataset_payload["dataset_id"] = 42
     non_utc_payload = valid_payload()
     non_utc_payload["generated_at"] = "2026-01-02T04:00:00+04:00"
 
     with client_with_fake_service() as client:
         order_like_response = client.post("/backtests/runs", json=order_payload)
-        dataset_response = client.post("/backtests/runs", json=dataset_payload)
         non_utc_response = client.post("/backtests/runs", json=non_utc_payload)
 
     assert order_like_response.status_code == 422
-    assert dataset_response.status_code == 422
     assert non_utc_response.status_code == 422
+
+
+def test_backtest_request_rejects_dataset_id_with_selector_fields() -> None:
+    payload = valid_payload()
+    payload["dataset_id"] = 42
+
+    with client_with_fake_service() as client:
+        response = client.post("/backtests/runs", json=payload)
+
+    assert response.status_code == 422
+
+
+def test_backtest_request_rejects_missing_dataset_id_and_incomplete_selector() -> None:
+    payload = valid_payload()
+    del payload["decision_time"]
+
+    with client_with_fake_service() as client:
+        response = client.post("/backtests/runs", json=payload)
+
+    assert response.status_code == 422

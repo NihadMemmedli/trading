@@ -14,7 +14,11 @@ from trading.apps.api.schemas.backtests import (
     BacktestRunResponse,
     BacktestRunSummaryResponse,
 )
-from trading.services.backtests import BacktestRunNotFoundError
+from trading.services.backtests import (
+    BacktestDatasetNotExecutableError,
+    BacktestDatasetNotFoundError,
+    BacktestRunNotFoundError,
+)
 
 router = APIRouter(prefix="/backtests", tags=["backtests"])
 
@@ -24,7 +28,18 @@ def create_backtest_run(
     request: BacktestRunCreateRequest,
     service: BacktestServiceDependency,
 ) -> BacktestRunResponse:
-    run = service.run_backtest(request.to_service_request())
+    try:
+        run = service.run_backtest(request.to_service_request())
+    except BacktestDatasetNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="dataset not found",
+        ) from exc
+    except BacktestDatasetNotExecutableError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=str(exc),
+        ) from exc
     return BacktestRunResponse.from_run(run)
 
 

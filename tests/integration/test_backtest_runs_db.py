@@ -22,6 +22,7 @@ from trading.data.quality import normalize_ohlcv_batch
 from trading.db.models import BacktestEquityPoint, BacktestRun, BacktestTrade, Dataset
 from trading.db.session import create_db_engine, create_session_factory
 from trading.services.backtests import (
+    BacktestDatasetNotExecutableError,
     BacktestRunRequest,
     BacktestService,
     _normalize_request,
@@ -73,6 +74,22 @@ def backtest_request() -> BacktestRunRequest:
         end=datetime(2026, 6, 1, 0, 4, tzinfo=UTC),
         decision_time=datetime(2026, 6, 1, 1, 0, tzinfo=UTC),
         generated_at=datetime(2026, 6, 1, 2, 0, tzinfo=UTC),
+        initial_capital=Decimal("1000"),
+        fee_bps=Decimal("1"),
+        slippage_bps=Decimal("2"),
+        strategy_name="moving_average_crossover",
+        strategy_parameters={"short_window": 1, "long_window": 2},
+    )
+
+
+def dataset_backtest_request(
+    dataset_id: int,
+    *,
+    generated_at: datetime | None = None,
+) -> BacktestRunRequest:
+    return BacktestRunRequest(
+        dataset_id=dataset_id,
+        generated_at=generated_at or datetime(2026, 6, 1, 2, 5, tzinfo=UTC),
         initial_capital=Decimal("1000"),
         fee_bps=Decimal("1"),
         slippage_bps=Decimal("2"),
@@ -220,6 +237,20 @@ def test_backtest_runs_migration_and_real_db_persistence(tmp_path: Path) -> None
     ]
     assert first.id in {run.id for run in listed}
 
+    replayed = service.run_backtest(dataset_backtest_request(first.dataset_id))
+
+    assert replayed.status == BacktestRunStatus.SUCCEEDED.value
+    assert replayed.dataset_id == first.dataset_id
+    assert replayed.dataset_hash == first.dataset_hash
+    assert replayed.config_hash == first.config_hash
+    assert len(replayed.trades) == first.metrics_json["trades_count"]
+    assert [point.timestamp for point in replayed.equity_points] == [
+        datetime(2026, 6, 1, 0, 0, tzinfo=UTC),
+        datetime(2026, 6, 1, 0, 1, tzinfo=UTC),
+        datetime(2026, 6, 1, 0, 2, tzinfo=UTC),
+        datetime(2026, 6, 1, 0, 3, tzinfo=UTC),
+    ]
+
     failed = service.run_backtest(
         BacktestRunRequest(
             **{
@@ -290,6 +321,63 @@ def test_backtest_runs_migration_and_real_db_persistence(tmp_path: Path) -> None
     assert historical_retrieved.dataset_id is None
     assert historical_retrieved.trades == []
     assert historical_retrieved.equity_points == []
+
+
+def test_backtest_dataset_id_replay_rejects_non_backtest_dataset_and_hash_mismatch(
+    tmp_path: Path,
+) -> None:
+    settings = require_postgres()
+    config = alembic_config(settings)
+    command.downgrade(config, "base")
+    command.upgrade(config, "head")
+
+    engine = create_db_engine(settings)
+    session_factory = create_session_factory(engine)
+    insert_candles(IngestionService(session_factory))
+    service = BacktestService(session_factory, reports_dir=tmp_path)
+    request = backtest_request()
+    run = service.run_backtest(request)
+
+    assert run.dataset_id is not None
+    assert run.dataset_hash is not None
+
+    with session_factory() as session:
+        non_backtest_dataset = Dataset(
+            name="binance:BTC/USDT:1m",
+            dataset_hash=run.dataset_hash,
+            decision_time=request.decision_time,
+            artifact_id=None,
+        )
+        hash_mismatch_dataset = Dataset(
+            name=deterministic_backtest_dataset_name(_normalize_request(request)),
+            dataset_hash="f" * 64,
+            decision_time=request.decision_time,
+            artifact_id=None,
+        )
+        session.add_all([non_backtest_dataset, hash_mismatch_dataset])
+        session.commit()
+        non_backtest_dataset_id = non_backtest_dataset.id
+        hash_mismatch_dataset_id = hash_mismatch_dataset.id
+
+    with pytest.raises(BacktestDatasetNotExecutableError, match="backtest-created"):
+        service.run_backtest(
+            dataset_backtest_request(
+                non_backtest_dataset_id,
+                generated_at=datetime(2026, 6, 1, 2, 10, tzinfo=UTC),
+            )
+        )
+
+    hash_mismatch_run = service.run_backtest(
+        dataset_backtest_request(
+            hash_mismatch_dataset_id,
+            generated_at=datetime(2026, 6, 1, 2, 15, tzinfo=UTC),
+        )
+    )
+
+    assert hash_mismatch_run.status == BacktestRunStatus.FAILED.value
+    assert hash_mismatch_run.dataset_id == hash_mismatch_dataset_id
+    assert hash_mismatch_run.error_message is not None
+    assert "hash" in hash_mismatch_run.error_message.lower()
 
 
 def test_backtest_dataset_lineage_upgrade_preserves_existing_runs() -> None:

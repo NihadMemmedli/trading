@@ -18,12 +18,13 @@ from trading.services.backtests import BacktestRunRequest
 class BacktestRunCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    dataset_id: int | None = Field(default=None, ge=1)
     exchange: str = Field(default="binance", min_length=1, max_length=64)
-    symbol: str
-    timeframe: str
-    start: datetime
-    end: datetime
-    decision_time: datetime
+    symbol: str | None = None
+    timeframe: str | None = None
+    start: datetime | None = None
+    end: datetime | None = None
+    decision_time: datetime | None = None
     generated_at: datetime
     initial_capital: Decimal = Field(gt=Decimal("0"))
     fee_bps: Decimal = Field(ge=Decimal("0"))
@@ -41,17 +42,23 @@ class BacktestRunCreateRequest(BaseModel):
 
     @field_validator("symbol")
     @classmethod
-    def validate_request_symbol(cls, value: str) -> str:
+    def validate_request_symbol(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
         return validate_symbol(value)
 
     @field_validator("timeframe")
     @classmethod
-    def validate_request_timeframe(cls, value: str) -> str:
+    def validate_request_timeframe(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
         return validate_timeframe(value)
 
     @field_validator("start", "end", "decision_time")
     @classmethod
-    def validate_datetime(cls, value: datetime) -> datetime:
+    def validate_datetime(cls, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
         return require_utc(value, field_name="datetime")
 
     @field_validator("generated_at")
@@ -61,13 +68,34 @@ class BacktestRunCreateRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_range(self) -> BacktestRunCreateRequest:
+        selector_fields = {"symbol", "timeframe", "start", "end", "decision_time"}
+        provided_selector_fields = selector_fields.intersection(self.model_fields_set)
+        has_dataset = self.dataset_id is not None
+
+        if has_dataset:
+            if provided_selector_fields or "exchange" in self.model_fields_set:
+                raise ValueError("provide either dataset_id or explicit selector fields, not both")
+            return self
+
+        if provided_selector_fields != selector_fields:
+            raise ValueError("provide dataset_id or complete selector fields")
+
+        if (
+            self.symbol is None
+            or self.timeframe is None
+            or self.start is None
+            or self.end is None
+            or self.decision_time is None
+        ):
+            raise ValueError("provide dataset_id or complete selector fields")
         if self.start >= self.end:
             raise ValueError("start must be earlier than end")
         return self
 
     def to_service_request(self) -> BacktestRunRequest:
         return BacktestRunRequest(
-            exchange=self.exchange,
+            dataset_id=self.dataset_id,
+            exchange=None if self.dataset_id is not None else self.exchange,
             symbol=self.symbol,
             timeframe=self.timeframe,
             start=self.start,
