@@ -111,6 +111,7 @@ class BacktestRun(Base):
         CheckConstraint("status IN ('succeeded', 'failed')", name="backtest_run_status_valid"),
         Index("ix_backtest_runs_status_created_at", "status", "created_at"),
         Index("ix_backtest_runs_exchange_symbol_timeframe", "exchange", "symbol", "timeframe"),
+        Index("ix_backtest_runs_dataset_id", "dataset_id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -127,6 +128,11 @@ class BacktestRun(Base):
     slippage_bps: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
     strategy_name: Mapped[str] = mapped_column(String(128), nullable=False)
     strategy_parameters: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    dataset_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("datasets.id"),
+        nullable=True,
+    )
     dataset_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     config_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     result_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -144,6 +150,7 @@ class BacktestRun(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
     )
 
+    dataset: Mapped[Dataset | None] = relationship(back_populates="backtest_runs")
     trades: Mapped[list[BacktestTrade]] = relationship(
         back_populates="run",
         cascade="all, delete-orphan",
@@ -249,6 +256,8 @@ class Dataset(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+    backtest_runs: Mapped[list[BacktestRun]] = relationship(back_populates="dataset")
 
 
 class Candle(Base):
