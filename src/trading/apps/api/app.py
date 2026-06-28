@@ -7,7 +7,17 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from trading.apps.api.routers import backtests, config, datasets, health, ingestion, version
+from trading.apps.api.routers import (
+    agents,
+    backtests,
+    config,
+    datasets,
+    health,
+    ingestion,
+    risk,
+    trade_proposals,
+    version,
+)
 from trading.core.logging import configure_logging
 from trading.core.settings import Settings, load_settings
 
@@ -35,6 +45,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(ingestion.router)
     app.include_router(datasets.router)
     app.include_router(backtests.router)
+    app.include_router(agents.router)
+    app.include_router(trade_proposals.router)
+    app.include_router(risk.router)
     return app
 
 

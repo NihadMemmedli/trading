@@ -8,9 +8,11 @@ from fastapi import Depends, Request
 
 from trading.core.settings import Settings
 from trading.db.session import create_db_engine, create_session_factory
+from trading.services.agent_signals import AgentSignalService
 from trading.services.backtests import BacktestService
 from trading.services.datasets import DatasetService
 from trading.services.ingestion import IngestionService
+from trading.services.risk_decisions import RiskDecisionService
 
 
 def get_settings(request: Request) -> Settings:
@@ -45,3 +47,25 @@ def get_backtest_service(settings: SettingsDependency) -> BacktestService:
 
 
 BacktestServiceDependency = Annotated[BacktestService, Depends(get_backtest_service)]
+
+
+def get_agent_signal_service(settings: SettingsDependency) -> AgentSignalService:
+    engine = create_db_engine(settings)
+    return AgentSignalService(create_session_factory(engine))
+
+
+AgentSignalServiceDependency = Annotated[
+    AgentSignalService,
+    Depends(get_agent_signal_service),
+]
+
+
+def get_risk_decision_service(settings: SettingsDependency) -> RiskDecisionService:
+    engine = create_db_engine(settings)
+    return RiskDecisionService(create_session_factory(engine))
+
+
+RiskDecisionServiceDependency = Annotated[
+    RiskDecisionService,
+    Depends(get_risk_decision_service),
+]
