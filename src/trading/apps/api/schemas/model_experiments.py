@@ -10,12 +10,18 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from trading.data.market import require_utc
 from trading.services.model_experiments import (
+    DEFAULT_BASELINE_NAME,
+    SplitWindowCreateRequest,
+)
+from trading.services.model_experiments import (
+    BaselineEvaluationRequest as ServiceBaselineEvaluationRequest,
+)
+from trading.services.model_experiments import (
     ModelExperimentCreateRequest as ServiceModelExperimentCreateRequest,
 )
 from trading.services.model_experiments import (
     SplitDefinitionCreateRequest as ServiceSplitDefinitionCreateRequest,
 )
-from trading.services.model_experiments import SplitWindowCreateRequest
 
 
 class SplitWindowRequest(BaseModel):
@@ -139,6 +145,29 @@ class ModelExperimentCreateRequest(BaseModel):
             status=self.status,
             started_at=self.started_at,
             completed_at=self.completed_at,
+        )
+
+
+class BaselineEvaluationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    dataset_id: int = Field(ge=1)
+    feature_set_id: int = Field(ge=1)
+    split_definition_id: int = Field(ge=1)
+    name: str = Field(min_length=1, max_length=128)
+    baseline_name: str = Field(default=DEFAULT_BASELINE_NAME, min_length=1, max_length=128)
+    code_version: str = Field(default="baseline_evaluator_v1", min_length=1, max_length=64)
+    parameters: dict[str, Any] = Field(default_factory=dict)
+
+    def to_service_request(self) -> ServiceBaselineEvaluationRequest:
+        return ServiceBaselineEvaluationRequest(
+            dataset_id=self.dataset_id,
+            feature_set_id=self.feature_set_id,
+            split_definition_id=self.split_definition_id,
+            name=self.name,
+            baseline_name=self.baseline_name,
+            code_version=self.code_version,
+            parameters=self.parameters,
         )
 
 
