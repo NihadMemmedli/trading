@@ -403,6 +403,7 @@ class Dataset(Base):
     feature_sets: Mapped[list[FeatureSet]] = relationship(back_populates="dataset")
     split_definitions: Mapped[list[SplitDefinition]] = relationship(back_populates="dataset")
     model_experiments: Mapped[list[ModelExperiment]] = relationship(back_populates="dataset")
+    labels: Mapped[list[Label]] = relationship(back_populates="dataset")
 
 
 class FeatureSet(Base):
@@ -441,6 +442,8 @@ class FeatureSet(Base):
     )
     split_definitions: Mapped[list[SplitDefinition]] = relationship(back_populates="feature_set")
     model_experiments: Mapped[list[ModelExperiment]] = relationship(back_populates="feature_set")
+    labels: Mapped[list[Label]] = relationship(back_populates="feature_set")
+    model_predictions: Mapped[list[ModelPrediction]] = relationship(back_populates="feature_set")
 
 
 class SplitDefinition(Base):
@@ -572,6 +575,11 @@ class ModelExperiment(Base):
     dataset: Mapped[Dataset] = relationship(back_populates="model_experiments")
     feature_set: Mapped[FeatureSet] = relationship(back_populates="model_experiments")
     split_definition: Mapped[SplitDefinition] = relationship(back_populates="model_experiments")
+    predictions: Mapped[list[ModelPrediction]] = relationship(
+        back_populates="model_experiment",
+        cascade="all, delete-orphan",
+        order_by="ModelPrediction.decision_time, ModelPrediction.id",
+    )
 
 
 class FeatureRow(Base):
@@ -616,6 +624,129 @@ class FeatureRow(Base):
 
     feature_set: Mapped[FeatureSet] = relationship(back_populates="rows")
     pair: Mapped[TradingPair] = relationship(back_populates="feature_rows")
+    labels: Mapped[list[Label]] = relationship(
+        back_populates="feature_row",
+        cascade="all, delete-orphan",
+    )
+    model_predictions: Mapped[list[ModelPrediction]] = relationship(
+        back_populates="feature_row",
+        cascade="all, delete-orphan",
+    )
+
+
+class Label(Base):
+    __tablename__ = "labels"
+    __table_args__ = (
+        CheckConstraint(
+            "observed_at >= decision_time",
+            name="label_observed_after_decision",
+        ),
+        UniqueConstraint("feature_set_id", "feature_row_id", "label_name"),
+        Index("ix_labels_dataset_feature_set", "dataset_id", "feature_set_id"),
+        Index("ix_labels_feature_row_id", "feature_row_id"),
+        Index("ix_labels_pair_timeframe_timestamp", "pair_id", "timeframe", "timestamp"),
+        Index("ix_labels_hash", "label_hash"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    dataset_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("datasets.id"),
+        nullable=False,
+    )
+    feature_set_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("feature_sets.id"),
+        nullable=False,
+    )
+    feature_row_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("feature_rows.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    pair_id: Mapped[int] = mapped_column(ForeignKey("trading_pairs.id"), nullable=False)
+    timeframe: Mapped[str] = mapped_column(String(16), nullable=False)
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    feature_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    label_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    label_value_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    label_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    decision_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    dataset: Mapped[Dataset] = relationship(back_populates="labels")
+    feature_set: Mapped[FeatureSet] = relationship(back_populates="labels")
+    feature_row: Mapped[FeatureRow] = relationship(back_populates="labels")
+
+
+class ModelPrediction(Base):
+    __tablename__ = "model_predictions"
+    __table_args__ = (
+        CheckConstraint(
+            "confidence >= 0 AND confidence <= 1",
+            name="model_prediction_confidence_valid",
+        ),
+        CheckConstraint(
+            "decision_time >= feature_row_decision_time",
+            name="model_prediction_after_feature_decision",
+        ),
+        UniqueConstraint("model_experiment_id", "feature_row_id", "prediction_hash"),
+        Index("ix_model_predictions_experiment_decision", "model_experiment_id", "decision_time"),
+        Index("ix_model_predictions_feature_set_row", "feature_set_id", "feature_row_id"),
+        Index("ix_model_predictions_hash", "prediction_hash"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    model_experiment_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("model_experiments.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    dataset_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("datasets.id"),
+        nullable=False,
+    )
+    feature_set_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("feature_sets.id"),
+        nullable=False,
+    )
+    split_definition_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("split_definitions.id"),
+        nullable=False,
+    )
+    feature_row_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("feature_rows.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    pair_id: Mapped[int] = mapped_column(ForeignKey("trading_pairs.id"), nullable=False)
+    timeframe: Mapped[str] = mapped_column(String(16), nullable=False)
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    feature_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    prediction_value_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    confidence: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    decision_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    feature_row_decision_time: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    prediction_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    lineage_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    model_experiment: Mapped[ModelExperiment] = relationship(back_populates="predictions")
+    dataset: Mapped[Dataset] = relationship()
+    split_definition: Mapped[SplitDefinition] = relationship()
+    feature_set: Mapped[FeatureSet] = relationship(back_populates="model_predictions")
+    feature_row: Mapped[FeatureRow] = relationship(back_populates="model_predictions")
 
 
 class Candle(Base):

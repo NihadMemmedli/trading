@@ -19,7 +19,9 @@ from trading.db.models import (
     Dataset,
     FeatureRow,
     FeatureSet,
+    Label,
     ModelExperiment,
+    ModelPrediction,
     SplitDefinition,
     SplitWindow,
 )
@@ -38,6 +40,18 @@ class SplitDefinitionNotFoundError(LookupError):
 
 class ModelExperimentNotFoundError(LookupError):
     """Raised when a model experiment cannot be found."""
+
+
+class LabelNotFoundError(LookupError):
+    """Raised when a label cannot be found."""
+
+
+class ModelPredictionNotFoundError(LookupError):
+    """Raised when a model prediction cannot be found."""
+
+
+class ModelingConflictError(ValueError):
+    """Raised when a modeling record violates a uniqueness contract."""
 
 
 class ModelExperimentLineageError(ValueError):
@@ -94,6 +108,36 @@ class BaselineEvaluationRequest:
 
 
 @dataclass(frozen=True)
+class LabelCreateRequest:
+    dataset_id: int
+    feature_set_id: int
+    feature_row_id: int
+    feature_hash: str
+    label_name: str
+    label_value: Mapping[str, Any]
+    observed_at: datetime
+    metadata: Mapping[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class ModelPredictionCreateRequest:
+    model_experiment_id: uuid.UUID
+    feature_set_id: int
+    feature_row_id: int
+    feature_hash: str
+    prediction_value: Mapping[str, Any]
+    confidence: Decimal
+    decision_time: datetime
+    lineage: Mapping[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class PromotionGateRequest:
+    metric_path: str
+    minimum_value: Decimal
+
+
+@dataclass(frozen=True)
 class SplitWindowRecord:
     id: int
     window_index: int
@@ -134,6 +178,56 @@ class ModelExperimentRecord:
     completed_at: datetime | None
     created_at: datetime
     updated_at: datetime
+
+
+@dataclass(frozen=True)
+class LabelRecord:
+    id: int
+    dataset_id: int
+    feature_set_id: int
+    feature_row_id: int
+    pair_id: int
+    timeframe: str
+    timestamp: datetime
+    feature_hash: str
+    label_name: str
+    label_value: dict[str, Any]
+    label_hash: str
+    decision_time: datetime
+    observed_at: datetime
+    metadata: dict[str, Any]
+    created_at: datetime
+
+
+@dataclass(frozen=True)
+class ModelPredictionRecord:
+    id: int
+    model_experiment_id: uuid.UUID
+    dataset_id: int
+    feature_set_id: int
+    split_definition_id: int
+    feature_row_id: int
+    pair_id: int
+    timeframe: str
+    timestamp: datetime
+    feature_hash: str
+    prediction_value: dict[str, Any]
+    confidence: Decimal
+    decision_time: datetime
+    feature_row_decision_time: datetime
+    prediction_hash: str
+    lineage: dict[str, Any]
+    created_at: datetime
+
+
+@dataclass(frozen=True)
+class PromotionGateRecord:
+    model_experiment_id: uuid.UUID
+    approved: bool
+    metric_path: str
+    metric_value: Decimal | None
+    minimum_value: Decimal
+    reason: str
 
 
 @dataclass(frozen=True)
@@ -450,6 +544,270 @@ class ModelExperimentService:
             ).scalars()
             return [_experiment_record_from_model(experiment) for experiment in rows]
 
+    def create_label(self, request: LabelCreateRequest) -> LabelRecord:
+        label_name = _normalize_name(request.label_name, field_name="label_name")
+        label_value = _json_copy(dict(request.label_value), field_name="label_value")
+        metadata = _json_copy(dict(request.metadata or {}), field_name="metadata")
+        observed_at = require_utc(request.observed_at, field_name="observed_at")
+        feature_hash = _normalize_hash(request.feature_hash, field_name="feature_hash")
+
+        with session_scope(self._session_factory) as session:
+            self._validate_lineage(session, request.dataset_id, request.feature_set_id)
+            feature_row = _load_feature_row_for_lineage(
+                session,
+                feature_set_id=request.feature_set_id,
+                feature_row_id=request.feature_row_id,
+                feature_hash=feature_hash,
+            )
+            if observed_at < feature_row.decision_time:
+                raise SplitValidationError(
+                    "observed_at must not be before feature row decision_time"
+                )
+            existing = _find_existing_label(
+                session,
+                feature_set_id=request.feature_set_id,
+                feature_row_id=request.feature_row_id,
+                label_name=label_name,
+            )
+            if existing is not None:
+                raise ModelingConflictError("label already exists")
+            label_hash = deterministic_label_hash(
+                dataset_id=request.dataset_id,
+                feature_set_id=request.feature_set_id,
+                feature_row_id=request.feature_row_id,
+                feature_hash=feature_hash,
+                label_name=label_name,
+                label_value=label_value,
+                decision_time=feature_row.decision_time,
+                observed_at=observed_at,
+                metadata=metadata,
+            )
+            label = Label(
+                dataset_id=request.dataset_id,
+                feature_set_id=request.feature_set_id,
+                feature_row_id=request.feature_row_id,
+                pair_id=feature_row.pair_id,
+                timeframe=feature_row.timeframe,
+                timestamp=feature_row.timestamp,
+                feature_hash=feature_hash,
+                label_name=label_name,
+                label_value_json=label_value,
+                label_hash=label_hash,
+                decision_time=feature_row.decision_time,
+                observed_at=observed_at,
+                metadata_json=metadata,
+            )
+            session.add(label)
+            session.flush()
+            session.refresh(label)
+            return _label_record_from_model(label)
+
+    def get_label(self, label_id: int) -> LabelRecord:
+        if isinstance(label_id, bool) or label_id < 1:
+            raise LabelNotFoundError(str(label_id))
+
+        with session_scope(self._session_factory) as session:
+            label = session.get(Label, label_id)
+            if label is None:
+                raise LabelNotFoundError(str(label_id))
+            return _label_record_from_model(label)
+
+    def list_labels(
+        self,
+        *,
+        limit: int = 50,
+        dataset_id: int | None = None,
+        feature_set_id: int | None = None,
+        feature_row_id: int | None = None,
+        label_name: str | None = None,
+    ) -> list[LabelRecord]:
+        _validate_positive_limit(limit)
+        _validate_optional_positive_id(dataset_id, field_name="dataset_id")
+        _validate_optional_positive_id(feature_set_id, field_name="feature_set_id")
+        _validate_optional_positive_id(feature_row_id, field_name="feature_row_id")
+        normalized_label_name = (
+            _normalize_name(label_name, field_name="label_name") if label_name is not None else None
+        )
+
+        with session_scope(self._session_factory) as session:
+            query = select(Label)
+            if dataset_id is not None:
+                query = query.where(Label.dataset_id == dataset_id)
+            if feature_set_id is not None:
+                query = query.where(Label.feature_set_id == feature_set_id)
+            if feature_row_id is not None:
+                query = query.where(Label.feature_row_id == feature_row_id)
+            if normalized_label_name is not None:
+                query = query.where(Label.label_name == normalized_label_name)
+            rows = session.execute(
+                query.order_by(Label.created_at.desc(), Label.id.desc()).limit(limit)
+            ).scalars()
+            return [_label_record_from_model(label) for label in rows]
+
+    def create_model_prediction(
+        self,
+        request: ModelPredictionCreateRequest,
+    ) -> ModelPredictionRecord:
+        feature_hash = _normalize_hash(request.feature_hash, field_name="feature_hash")
+        prediction_value = _json_copy(dict(request.prediction_value), field_name="prediction_value")
+        lineage = _json_copy(dict(request.lineage or {}), field_name="lineage")
+        confidence = _normalize_confidence(request.confidence)
+        decision_time = require_utc(request.decision_time, field_name="decision_time")
+
+        with session_scope(self._session_factory) as session:
+            experiment = session.get(ModelExperiment, request.model_experiment_id)
+            if experiment is None:
+                raise ModelExperimentNotFoundError(str(request.model_experiment_id))
+            if experiment.status != "succeeded":
+                raise SplitValidationError("model experiment must be succeeded")
+            if not experiment.metrics_json:
+                raise SplitValidationError("model experiment must include metrics")
+            if experiment.feature_set_id != request.feature_set_id:
+                raise ModelExperimentLineageError("model experiment feature_set_id mismatch")
+            self._validate_lineage(session, experiment.dataset_id, request.feature_set_id)
+            feature_row = _load_feature_row_for_lineage(
+                session,
+                feature_set_id=request.feature_set_id,
+                feature_row_id=request.feature_row_id,
+                feature_hash=feature_hash,
+            )
+            if feature_row.decision_time > decision_time:
+                raise SplitValidationError(
+                    "decision_time must not be before feature row decision_time"
+                )
+            if feature_row.available_at > decision_time:
+                raise SplitValidationError("feature row is not available at decision_time")
+            prediction_hash = deterministic_prediction_hash(
+                model_experiment_id=request.model_experiment_id,
+                dataset_id=experiment.dataset_id,
+                feature_set_id=request.feature_set_id,
+                split_definition_id=experiment.split_definition_id,
+                feature_row_id=request.feature_row_id,
+                feature_hash=feature_hash,
+                prediction_value=prediction_value,
+                confidence=confidence,
+                decision_time=decision_time,
+                lineage=lineage,
+            )
+            existing = _find_existing_model_prediction(
+                session,
+                model_experiment_id=request.model_experiment_id,
+                feature_row_id=request.feature_row_id,
+                prediction_hash=prediction_hash,
+            )
+            if existing is not None:
+                raise ModelingConflictError("model prediction already exists")
+            prediction = ModelPrediction(
+                model_experiment_id=request.model_experiment_id,
+                dataset_id=experiment.dataset_id,
+                feature_set_id=request.feature_set_id,
+                split_definition_id=experiment.split_definition_id,
+                feature_row_id=request.feature_row_id,
+                pair_id=feature_row.pair_id,
+                timeframe=feature_row.timeframe,
+                timestamp=feature_row.timestamp,
+                feature_hash=feature_hash,
+                prediction_value_json=prediction_value,
+                confidence=confidence,
+                decision_time=decision_time,
+                feature_row_decision_time=feature_row.decision_time,
+                prediction_hash=prediction_hash,
+                lineage_json=lineage,
+            )
+            session.add(prediction)
+            session.flush()
+            session.refresh(prediction)
+            return _prediction_record_from_model(prediction)
+
+    def get_model_prediction(self, prediction_id: int) -> ModelPredictionRecord:
+        if isinstance(prediction_id, bool) or prediction_id < 1:
+            raise ModelPredictionNotFoundError(str(prediction_id))
+
+        with session_scope(self._session_factory) as session:
+            prediction = session.get(ModelPrediction, prediction_id)
+            if prediction is None:
+                raise ModelPredictionNotFoundError(str(prediction_id))
+            return _prediction_record_from_model(prediction)
+
+    def list_model_predictions(
+        self,
+        *,
+        limit: int = 50,
+        model_experiment_id: uuid.UUID | None = None,
+        feature_set_id: int | None = None,
+        feature_row_id: int | None = None,
+    ) -> list[ModelPredictionRecord]:
+        _validate_positive_limit(limit)
+        _validate_optional_positive_id(feature_set_id, field_name="feature_set_id")
+        _validate_optional_positive_id(feature_row_id, field_name="feature_row_id")
+
+        with session_scope(self._session_factory) as session:
+            query = select(ModelPrediction)
+            if model_experiment_id is not None:
+                query = query.where(ModelPrediction.model_experiment_id == model_experiment_id)
+            if feature_set_id is not None:
+                query = query.where(ModelPrediction.feature_set_id == feature_set_id)
+            if feature_row_id is not None:
+                query = query.where(ModelPrediction.feature_row_id == feature_row_id)
+            rows = session.execute(
+                query.order_by(
+                    ModelPrediction.created_at.desc(),
+                    ModelPrediction.id.desc(),
+                ).limit(limit)
+            ).scalars()
+            return [_prediction_record_from_model(prediction) for prediction in rows]
+
+    def evaluate_promotion_gate(
+        self,
+        experiment_id: uuid.UUID,
+        request: PromotionGateRequest,
+    ) -> PromotionGateRecord:
+        metric_path = _normalize_metric_path(request.metric_path)
+        minimum_value = _normalize_decimal(request.minimum_value, field_name="minimum_value")
+
+        with session_scope(self._session_factory) as session:
+            experiment = session.get(ModelExperiment, experiment_id)
+            if experiment is None:
+                raise ModelExperimentNotFoundError(str(experiment_id))
+            if experiment.status != "succeeded":
+                return PromotionGateRecord(
+                    model_experiment_id=experiment_id,
+                    approved=False,
+                    metric_path=metric_path,
+                    metric_value=None,
+                    minimum_value=minimum_value,
+                    reason="model experiment is not succeeded",
+                )
+            if not experiment.metrics_json:
+                return PromotionGateRecord(
+                    model_experiment_id=experiment_id,
+                    approved=False,
+                    metric_path=metric_path,
+                    metric_value=None,
+                    minimum_value=minimum_value,
+                    reason="model experiment has no metrics",
+                )
+            raw_value = _metric_value_at_path(experiment.metrics_json, metric_path)
+            if raw_value is None:
+                return PromotionGateRecord(
+                    model_experiment_id=experiment_id,
+                    approved=False,
+                    metric_path=metric_path,
+                    metric_value=None,
+                    minimum_value=minimum_value,
+                    reason="metric not found",
+                )
+            metric_value = _normalize_decimal(raw_value, field_name="metric_value")
+            approved = metric_value >= minimum_value
+            return PromotionGateRecord(
+                model_experiment_id=experiment_id,
+                approved=approved,
+                metric_path=metric_path,
+                metric_value=metric_value,
+                minimum_value=minimum_value,
+                reason="metric threshold passed" if approved else "metric below threshold",
+            )
+
     def _validate_lineage(
         self,
         session: Session,
@@ -514,6 +872,62 @@ class ModelExperimentService:
 
 def deterministic_model_parameter_hash(parameters: Mapping[str, Any]) -> str:
     return _sha256_json({"parameters": _json_copy(dict(parameters), field_name="parameters")})
+
+
+def deterministic_label_hash(
+    *,
+    dataset_id: int,
+    feature_set_id: int,
+    feature_row_id: int,
+    feature_hash: str,
+    label_name: str,
+    label_value: Mapping[str, Any],
+    decision_time: datetime,
+    observed_at: datetime,
+    metadata: Mapping[str, Any],
+) -> str:
+    return _sha256_json(
+        {
+            "dataset_id": dataset_id,
+            "feature_set_id": feature_set_id,
+            "feature_row_id": feature_row_id,
+            "feature_hash": feature_hash,
+            "label_name": label_name,
+            "label_value": _json_copy(dict(label_value), field_name="label_value"),
+            "decision_time": decision_time,
+            "observed_at": observed_at,
+            "metadata": _json_copy(dict(metadata), field_name="metadata"),
+        }
+    )
+
+
+def deterministic_prediction_hash(
+    *,
+    model_experiment_id: uuid.UUID,
+    dataset_id: int,
+    feature_set_id: int,
+    split_definition_id: int,
+    feature_row_id: int,
+    feature_hash: str,
+    prediction_value: Mapping[str, Any],
+    confidence: Decimal,
+    decision_time: datetime,
+    lineage: Mapping[str, Any],
+) -> str:
+    return _sha256_json(
+        {
+            "model_experiment_id": str(model_experiment_id),
+            "dataset_id": dataset_id,
+            "feature_set_id": feature_set_id,
+            "split_definition_id": split_definition_id,
+            "feature_row_id": feature_row_id,
+            "feature_hash": feature_hash,
+            "prediction_value": _json_copy(dict(prediction_value), field_name="prediction_value"),
+            "confidence": str(confidence),
+            "decision_time": decision_time,
+            "lineage": _json_copy(dict(lineage), field_name="lineage"),
+        }
+    )
 
 
 def deterministic_split_hash(
@@ -625,6 +1039,38 @@ def _find_existing_split_definition(
     ).scalar_one_or_none()
 
 
+def _find_existing_label(
+    session: Session,
+    *,
+    feature_set_id: int,
+    feature_row_id: int,
+    label_name: str,
+) -> Label | None:
+    return session.execute(
+        select(Label).where(
+            Label.feature_set_id == feature_set_id,
+            Label.feature_row_id == feature_row_id,
+            Label.label_name == label_name,
+        )
+    ).scalar_one_or_none()
+
+
+def _find_existing_model_prediction(
+    session: Session,
+    *,
+    model_experiment_id: uuid.UUID,
+    feature_row_id: int,
+    prediction_hash: str,
+) -> ModelPrediction | None:
+    return session.execute(
+        select(ModelPrediction).where(
+            ModelPrediction.model_experiment_id == model_experiment_id,
+            ModelPrediction.feature_row_id == feature_row_id,
+            ModelPrediction.prediction_hash == prediction_hash,
+        )
+    ).scalar_one_or_none()
+
+
 def _load_split_definition(session: Session, split_definition_id: int) -> SplitDefinition:
     split_definition = session.execute(
         select(SplitDefinition)
@@ -634,6 +1080,25 @@ def _load_split_definition(session: Session, split_definition_id: int) -> SplitD
     if split_definition is None:
         raise SplitDefinitionNotFoundError(str(split_definition_id))
     return split_definition
+
+
+def _load_feature_row_for_lineage(
+    session: Session,
+    *,
+    feature_set_id: int,
+    feature_row_id: int,
+    feature_hash: str,
+) -> FeatureRow:
+    if isinstance(feature_row_id, bool) or feature_row_id < 1:
+        raise ModelExperimentLineageError("feature row not found")
+    feature_row = session.get(FeatureRow, feature_row_id)
+    if feature_row is None:
+        raise ModelExperimentLineageError("feature row not found")
+    if feature_row.feature_set_id != feature_set_id:
+        raise ModelExperimentLineageError("feature row feature_set_id mismatch")
+    if feature_row.feature_hash != feature_hash:
+        raise ModelExperimentLineageError("feature row feature_hash mismatch")
+    return feature_row
 
 
 def _load_baseline_evaluation_windows(
@@ -918,12 +1383,61 @@ def _experiment_record_from_model(experiment: ModelExperiment) -> ModelExperimen
     )
 
 
+def _label_record_from_model(label: Label) -> LabelRecord:
+    return LabelRecord(
+        id=label.id,
+        dataset_id=label.dataset_id,
+        feature_set_id=label.feature_set_id,
+        feature_row_id=label.feature_row_id,
+        pair_id=label.pair_id,
+        timeframe=label.timeframe,
+        timestamp=label.timestamp,
+        feature_hash=label.feature_hash,
+        label_name=label.label_name,
+        label_value=dict(label.label_value_json),
+        label_hash=label.label_hash,
+        decision_time=label.decision_time,
+        observed_at=label.observed_at,
+        metadata=dict(label.metadata_json),
+        created_at=label.created_at,
+    )
+
+
+def _prediction_record_from_model(prediction: ModelPrediction) -> ModelPredictionRecord:
+    return ModelPredictionRecord(
+        id=prediction.id,
+        model_experiment_id=prediction.model_experiment_id,
+        dataset_id=prediction.dataset_id,
+        feature_set_id=prediction.feature_set_id,
+        split_definition_id=prediction.split_definition_id,
+        feature_row_id=prediction.feature_row_id,
+        pair_id=prediction.pair_id,
+        timeframe=prediction.timeframe,
+        timestamp=prediction.timestamp,
+        feature_hash=prediction.feature_hash,
+        prediction_value=dict(prediction.prediction_value_json),
+        confidence=prediction.confidence,
+        decision_time=prediction.decision_time,
+        feature_row_decision_time=prediction.feature_row_decision_time,
+        prediction_hash=prediction.prediction_hash,
+        lineage=dict(prediction.lineage_json),
+        created_at=prediction.created_at,
+    )
+
+
 def _normalize_name(name: str, *, field_name: str, max_len: int = 128) -> str:
     normalized = name.strip()
     if not normalized:
         raise SplitValidationError(f"{field_name} must not be empty")
     if len(normalized) > max_len:
         raise SplitValidationError(f"{field_name} must be at most {max_len} characters")
+    return normalized
+
+
+def _normalize_hash(value: str, *, field_name: str) -> str:
+    normalized = value.strip().lower()
+    if len(normalized) != 64 or any(char not in "0123456789abcdef" for char in normalized):
+        raise SplitValidationError(f"{field_name} must be a SHA-256 hex digest")
     return normalized
 
 
@@ -945,6 +1459,43 @@ def _normalize_optional_utc(value: datetime | None, *, field_name: str) -> datet
     if value is None:
         return None
     return require_utc(value, field_name=field_name)
+
+
+def _normalize_confidence(value: Decimal) -> Decimal:
+    normalized = _normalize_decimal(value, field_name="confidence")
+    if normalized < Decimal("0") or normalized > Decimal("1"):
+        raise SplitValidationError("confidence must be between 0 and 1")
+    return normalized
+
+
+def _normalize_decimal(value: Any, *, field_name: str) -> Decimal:
+    if isinstance(value, bool):
+        raise SplitValidationError(f"{field_name} must be numeric")
+    try:
+        normalized = Decimal(str(value))
+    except (InvalidOperation, ValueError) as exc:
+        raise SplitValidationError(f"{field_name} must be numeric") from exc
+    if not normalized.is_finite():
+        raise SplitValidationError(f"{field_name} must be finite")
+    return normalized
+
+
+def _normalize_metric_path(value: str) -> str:
+    normalized = value.strip()
+    if not normalized:
+        raise SplitValidationError("metric_path must not be empty")
+    if any(not part.strip() for part in normalized.split(".")):
+        raise SplitValidationError("metric_path must contain non-empty path segments")
+    return normalized
+
+
+def _metric_value_at_path(metrics: Mapping[str, Any], metric_path: str) -> Any:
+    current: Any = metrics
+    for part in metric_path.split("."):
+        if not isinstance(current, Mapping) or part not in current:
+            return None
+        current = current[part]
+    return current
 
 
 def _validate_positive_limit(limit: int) -> None:

@@ -21,8 +21,12 @@ from trading.services.feature_sets import FeatureSetCreateRequest, FeatureSetSer
 from trading.services.ingestion import IngestionService
 from trading.services.model_experiments import (
     BaselineEvaluationRequest,
+    LabelCreateRequest,
     ModelExperimentCreateRequest,
     ModelExperimentService,
+    ModelingConflictError,
+    ModelPredictionCreateRequest,
+    PromotionGateRequest,
     SplitDefinitionCreateRequest,
     SplitValidationError,
     SplitWindowCreateRequest,
@@ -331,6 +335,101 @@ def test_model_split_and_experiment_migration_service_and_api() -> None:
     assert listed_experiments[0].id == experiment.id
     assert experiment.parameter_hash
 
+    with engine.begin() as connection:
+        feature_row = (
+            connection.execute(
+                sa.text(
+                    "SELECT id, pair_id, timeframe, timestamp, feature_hash, decision_time "
+                    "FROM feature_rows "
+                    "WHERE feature_set_id = :feature_set_id "
+                    "ORDER BY timestamp LIMIT 1"
+                ),
+                {"feature_set_id": feature_set_id},
+            )
+            .mappings()
+            .one()
+        )
+        features_with_labels = connection.execute(
+            sa.text(
+                "SELECT count(*) FROM feature_rows "
+                "WHERE feature_set_id = :feature_set_id "
+                "AND (features_json ? 'label' "
+                "OR features_json ? 'labels' "
+                "OR features_json ? 'target')"
+            ),
+            {"feature_set_id": feature_set_id},
+        ).scalar_one()
+
+    assert features_with_labels == 0
+
+    label = service.create_label(
+        LabelCreateRequest(
+            dataset_id=dataset_id,
+            feature_set_id=feature_set_id,
+            feature_row_id=feature_row["id"],
+            feature_hash=feature_row["feature_hash"],
+            label_name="forward_return_1",
+            label_value={"direction": "up", "return": "0.01"},
+            observed_at=datetime(2026, 6, 1, 1, 1, tzinfo=UTC),
+            metadata={"horizon": "1m"},
+        )
+    )
+    prediction = service.create_model_prediction(
+        ModelPredictionCreateRequest(
+            model_experiment_id=experiment.id,
+            feature_set_id=feature_set_id,
+            feature_row_id=feature_row["id"],
+            feature_hash=feature_row["feature_hash"],
+            prediction_value={"direction": "up", "score": "0.71"},
+            confidence="0.71",
+            decision_time=feature_row["decision_time"],
+            lineage={"source": "integration"},
+        )
+    )
+    gate = service.evaluate_promotion_gate(
+        experiment.id,
+        PromotionGateRequest(metric_path="auc", minimum_value="0.70"),
+    )
+
+    assert service.get_label(label.id).label_hash == label.label_hash
+    assert service.list_labels(feature_set_id=feature_set_id)[0].id == label.id
+    assert label.label_value == {"direction": "up", "return": "0.01"}
+    assert service.get_model_prediction(prediction.id).prediction_hash == (
+        prediction.prediction_hash
+    )
+    assert service.list_model_predictions(model_experiment_id=experiment.id)[0].id == prediction.id
+    assert prediction.dataset_id == dataset_id
+    assert prediction.split_definition_id == split.id
+    assert gate.approved is True
+    assert gate.reason == "metric threshold passed"
+
+    with pytest.raises(ModelingConflictError, match="label already exists"):
+        service.create_label(
+            LabelCreateRequest(
+                dataset_id=dataset_id,
+                feature_set_id=feature_set_id,
+                feature_row_id=feature_row["id"],
+                feature_hash=feature_row["feature_hash"],
+                label_name="forward_return_1",
+                label_value={"direction": "up", "return": "0.01"},
+                observed_at=datetime(2026, 6, 1, 1, 1, tzinfo=UTC),
+                metadata={"horizon": "1m"},
+            )
+        )
+    with pytest.raises(ModelingConflictError, match="model prediction already exists"):
+        service.create_model_prediction(
+            ModelPredictionCreateRequest(
+                model_experiment_id=experiment.id,
+                feature_set_id=feature_set_id,
+                feature_row_id=feature_row["id"],
+                feature_hash=feature_row["feature_hash"],
+                prediction_value={"direction": "up", "score": "0.71"},
+                confidence="0.71",
+                decision_time=feature_row["decision_time"],
+                lineage={"source": "integration"},
+            )
+        )
+
     baseline_experiment = service.evaluate_baseline_model(
         BaselineEvaluationRequest(
             dataset_id=dataset_id,
@@ -363,6 +462,12 @@ def test_model_split_and_experiment_migration_service_and_api() -> None:
         experiment_table = connection.execute(
             sa.text("SELECT to_regclass('public.model_experiments')")
         ).scalar_one()
+        label_table = connection.execute(
+            sa.text("SELECT to_regclass('public.labels')")
+        ).scalar_one()
+        prediction_table = connection.execute(
+            sa.text("SELECT to_regclass('public.model_predictions')")
+        ).scalar_one()
         split_config_type = connection.execute(
             sa.text(
                 "SELECT data_type FROM information_schema.columns "
@@ -373,6 +478,19 @@ def test_model_split_and_experiment_migration_service_and_api() -> None:
             sa.text(
                 "SELECT data_type FROM information_schema.columns "
                 "WHERE table_name = 'model_experiments' AND column_name = 'metrics_json'"
+            )
+        ).scalar_one()
+        label_value_type = connection.execute(
+            sa.text(
+                "SELECT data_type FROM information_schema.columns "
+                "WHERE table_name = 'labels' AND column_name = 'label_value_json'"
+            )
+        ).scalar_one()
+        prediction_value_type = connection.execute(
+            sa.text(
+                "SELECT data_type FROM information_schema.columns "
+                "WHERE table_name = 'model_predictions' "
+                "AND column_name = 'prediction_value_json'"
             )
         ).scalar_one()
         split_index = connection.execute(
@@ -389,6 +507,20 @@ def test_model_split_and_experiment_migration_service_and_api() -> None:
                 "AND indexname = 'ix_model_experiments_status_created_at'"
             )
         ).scalar_one()
+        label_index = connection.execute(
+            sa.text(
+                "SELECT indexname FROM pg_indexes "
+                "WHERE tablename = 'labels' "
+                "AND indexname = 'ix_labels_dataset_feature_set'"
+            )
+        ).scalar_one()
+        prediction_index = connection.execute(
+            sa.text(
+                "SELECT indexname FROM pg_indexes "
+                "WHERE tablename = 'model_predictions' "
+                "AND indexname = 'ix_model_predictions_experiment_decision'"
+            )
+        ).scalar_one()
         connection.execute(
             sa.text("DELETE FROM split_definitions WHERE id = :split_id"),
             {"split_id": cascade_split.id},
@@ -401,10 +533,16 @@ def test_model_split_and_experiment_migration_service_and_api() -> None:
     assert split_table == "split_definitions"
     assert window_table == "split_windows"
     assert experiment_table == "model_experiments"
+    assert label_table == "labels"
+    assert prediction_table == "model_predictions"
     assert split_config_type == "jsonb"
     assert experiment_metrics_type == "jsonb"
+    assert label_value_type == "jsonb"
+    assert prediction_value_type == "jsonb"
     assert split_index == "ix_split_definitions_dataset_feature_set"
     assert experiment_index == "ix_model_experiments_status_created_at"
+    assert label_index == "ix_labels_dataset_feature_set"
+    assert prediction_index == "ix_model_predictions_experiment_decision"
     assert cascade_window_count == 0
 
     assert_integrity_error(
@@ -454,6 +592,70 @@ def test_model_split_and_experiment_migration_service_and_api() -> None:
             "parameters_json": json.dumps({}),
             "metrics_json": json.dumps({}),
             "status": "created",
+        },
+    )
+    assert_integrity_error(
+        engine,
+        """
+        INSERT INTO labels (
+            dataset_id, feature_set_id, feature_row_id, pair_id, timeframe, timestamp,
+            feature_hash, label_name, label_value_json, label_hash, decision_time,
+            observed_at, metadata_json
+        )
+        VALUES (
+            :dataset_id, :feature_set_id, :feature_row_id, :pair_id, :timeframe,
+            :timestamp, :feature_hash, :label_name, CAST(:label_value_json AS jsonb),
+            :label_hash, :decision_time, :observed_at, CAST(:metadata_json AS jsonb)
+        )
+        """,
+        {
+            "dataset_id": 999_999,
+            "feature_set_id": feature_set_id,
+            "feature_row_id": feature_row["id"],
+            "pair_id": feature_row["pair_id"],
+            "timeframe": feature_row["timeframe"],
+            "timestamp": feature_row["timestamp"],
+            "feature_hash": feature_row["feature_hash"],
+            "label_name": "orphaned-label",
+            "label_value_json": json.dumps({"direction": "up"}),
+            "label_hash": "l" * 64,
+            "decision_time": feature_row["decision_time"],
+            "observed_at": datetime(2026, 6, 1, 1, 1, tzinfo=UTC),
+            "metadata_json": json.dumps({}),
+        },
+    )
+    assert_integrity_error(
+        engine,
+        """
+        INSERT INTO model_predictions (
+            model_experiment_id, dataset_id, feature_set_id, split_definition_id,
+            feature_row_id, pair_id, timeframe, timestamp, feature_hash,
+            prediction_value_json, confidence, decision_time,
+            feature_row_decision_time, prediction_hash, lineage_json
+        )
+        VALUES (
+            :model_experiment_id, :dataset_id, :feature_set_id, :split_definition_id,
+            :feature_row_id, :pair_id, :timeframe, :timestamp, :feature_hash,
+            CAST(:prediction_value_json AS jsonb), :confidence, :decision_time,
+            :feature_row_decision_time, :prediction_hash, CAST(:lineage_json AS jsonb)
+        )
+        """,
+        {
+            "model_experiment_id": str(experiment.id),
+            "dataset_id": dataset_id,
+            "feature_set_id": feature_set_id,
+            "split_definition_id": split.id,
+            "feature_row_id": feature_row["id"],
+            "pair_id": feature_row["pair_id"],
+            "timeframe": feature_row["timeframe"],
+            "timestamp": feature_row["timestamp"],
+            "feature_hash": feature_row["feature_hash"],
+            "prediction_value_json": json.dumps({"direction": "down"}),
+            "confidence": "1.1",
+            "decision_time": feature_row["decision_time"],
+            "feature_row_decision_time": feature_row["decision_time"],
+            "prediction_hash": "z" * 64,
+            "lineage_json": json.dumps({}),
         },
     )
 
@@ -521,6 +723,23 @@ def test_model_split_and_experiment_migration_service_and_api() -> None:
     assert api_baseline["status"] == "succeeded"
     assert api_baseline["metrics"]["overall"]["observations"] == 3
     assert api_baseline["parameters"]["split_definition"]["id"] == api_baseline_split["id"]
+
+    with engine.begin() as connection:
+        connection.execute(
+            sa.text("DELETE FROM feature_rows WHERE id = :feature_row_id"),
+            {"feature_row_id": feature_row["id"]},
+        )
+        cascaded_label_count = connection.execute(
+            sa.text("SELECT count(*) FROM labels WHERE id = :label_id"),
+            {"label_id": label.id},
+        ).scalar_one()
+        cascaded_prediction_count = connection.execute(
+            sa.text("SELECT count(*) FROM model_predictions WHERE id = :prediction_id"),
+            {"prediction_id": prediction.id},
+        ).scalar_one()
+
+    assert cascaded_label_count == 0
+    assert cascaded_prediction_count == 0
 
     command.downgrade(config, "base")
     command.upgrade(config, "head")
