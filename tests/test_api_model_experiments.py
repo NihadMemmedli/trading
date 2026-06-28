@@ -29,6 +29,7 @@ class FakeModelExperimentService:
         self.split_requests: list[object] = []
         self.experiment_requests: list[object] = []
         self.baseline_requests: list[object] = []
+        self.materialization_requests: list[object] = []
         self.label_requests: list[object] = []
         self.prediction_requests: list[object] = []
         self.promotion_gate_requests: list[object] = []
@@ -136,6 +137,57 @@ class FakeModelExperimentService:
         defaults.update(overrides)
         return SimpleNamespace(**defaults)
 
+    def _materialization(self, **overrides: object) -> SimpleNamespace:
+        experiment = overrides.pop("experiment", self._experiment())
+        defaults = {
+            "experiment": experiment,
+            "prediction_count": 3,
+            "label_count": 3,
+            "skipped_first_row_count": 3,
+            "split_counts": {
+                "train": {
+                    "prediction_count": 1,
+                    "label_count": 1,
+                    "skipped_first_row_count": 1,
+                },
+                "validation": {
+                    "prediction_count": 1,
+                    "label_count": 1,
+                    "skipped_first_row_count": 1,
+                },
+                "test": {
+                    "prediction_count": 1,
+                    "label_count": 1,
+                    "skipped_first_row_count": 1,
+                },
+            },
+            "window_counts": [
+                SimpleNamespace(
+                    window_index=0,
+                    split_name="train",
+                    prediction_count=1,
+                    label_count=1,
+                    skipped_first_row_count=1,
+                ),
+                SimpleNamespace(
+                    window_index=0,
+                    split_name="validation",
+                    prediction_count=1,
+                    label_count=1,
+                    skipped_first_row_count=1,
+                ),
+                SimpleNamespace(
+                    window_index=0,
+                    split_name="test",
+                    prediction_count=1,
+                    label_count=1,
+                    skipped_first_row_count=1,
+                ),
+            ],
+        }
+        defaults.update(overrides)
+        return SimpleNamespace(**defaults)
+
     def create_split_definition(self, request: Any) -> SimpleNamespace:
         self.split_requests.append(request)
         dataset_id = request.dataset_id
@@ -194,6 +246,36 @@ class FakeModelExperimentService:
             },
             metrics={"overall": {"observations": 3, "accuracy": 1.0}},
             status="succeeded",
+        )
+
+    def evaluate_baseline_materialization(self, request: Any) -> SimpleNamespace:
+        self.materialization_requests.append(request)
+        if request.dataset_id == 404:
+            raise ModelExperimentLineageError("dataset not found")
+        if request.dataset_id == 422:
+            raise ModelExperimentLineageError("feature set dataset_id mismatch")
+        if request.split_definition_id == 404:
+            raise SplitDefinitionNotFoundError(str(request.split_definition_id))
+        if request.split_definition_id == 422:
+            raise SplitValidationError("test window 0 has no baseline observations")
+        if request.name == "duplicate":
+            raise ModelingConflictError("label already exists")
+        prediction_count = 3 if request.persist_predictions else 0
+        label_count = 3 if request.persist_labels else 0
+        return self._materialization(
+            experiment=self._experiment(
+                name=request.name,
+                model_name=request.baseline_name,
+                code_version=request.code_version,
+                parameters={
+                    "baseline": {"name": request.baseline_name},
+                    "parameters": request.parameters,
+                },
+                metrics={"overall": {"observations": 3, "accuracy": 1.0}},
+                status="succeeded",
+            ),
+            prediction_count=prediction_count,
+            label_count=label_count,
         )
 
     def get_model_experiment(self, experiment_id: uuid.UUID) -> SimpleNamespace:
@@ -475,6 +557,29 @@ def test_create_baseline_evaluation() -> None:
     assert service.baseline_requests[0].code_version == "baseline_evaluator_v1"
 
 
+def test_materialize_baseline_evaluation() -> None:
+    service = FakeModelExperimentService()
+    payload = baseline_evaluation_payload()
+    payload["persist_predictions"] = True
+    payload["persist_labels"] = True
+
+    with client_with_fake_service(service) as client:
+        created = client.post("/modeling/evaluations/baseline/materialize", json=payload)
+
+    assert created.status_code == 200
+    body = created.json()
+    assert body["experiment_id"] == str(service.experiment_id)
+    assert body["experiment"]["status"] == "succeeded"
+    assert body["prediction_count"] == 3
+    assert body["label_count"] == 3
+    assert body["skipped_first_row_count"] == 3
+    assert body["split_counts"]["train"]["prediction_count"] == 1
+    assert body["window_counts"][0]["split_name"] == "train"
+    assert service.materialization_requests
+    assert service.materialization_requests[0].persist_predictions is True
+    assert service.materialization_requests[0].persist_labels is True
+
+
 def test_baseline_evaluation_route_maps_errors() -> None:
     missing_payload = baseline_evaluation_payload()
     missing_payload["dataset_id"] = 404
@@ -494,6 +599,45 @@ def test_baseline_evaluation_route_maps_errors() -> None:
     assert bad_lineage.json() == {"detail": "feature set dataset_id mismatch"}
     assert insufficient.status_code == 422
     assert insufficient.json() == {"detail": "test window 0 has no baseline observations"}
+
+
+def test_baseline_materialization_route_maps_errors_and_validates_options() -> None:
+    missing_payload = baseline_evaluation_payload()
+    missing_payload["dataset_id"] = 404
+    bad_lineage_payload = baseline_evaluation_payload()
+    bad_lineage_payload["dataset_id"] = 422
+    insufficient_payload = baseline_evaluation_payload()
+    insufficient_payload["split_definition_id"] = 422
+    duplicate_payload = baseline_evaluation_payload()
+    duplicate_payload["name"] = "duplicate"
+    malformed_payload = baseline_evaluation_payload()
+    malformed_payload["persist_predictions"] = False
+    malformed_payload["persist_labels"] = False
+
+    with client_with_fake_service() as client:
+        missing = client.post("/modeling/evaluations/baseline/materialize", json=missing_payload)
+        bad_lineage = client.post(
+            "/modeling/evaluations/baseline/materialize", json=bad_lineage_payload
+        )
+        insufficient = client.post(
+            "/modeling/evaluations/baseline/materialize", json=insufficient_payload
+        )
+        duplicate = client.post(
+            "/modeling/evaluations/baseline/materialize", json=duplicate_payload
+        )
+        malformed = client.post(
+            "/modeling/evaluations/baseline/materialize", json=malformed_payload
+        )
+
+    assert missing.status_code == 404
+    assert missing.json() == {"detail": "dataset not found"}
+    assert bad_lineage.status_code == 422
+    assert bad_lineage.json() == {"detail": "feature set dataset_id mismatch"}
+    assert insufficient.status_code == 422
+    assert insufficient.json() == {"detail": "test window 0 has no baseline observations"}
+    assert duplicate.status_code == 409
+    assert duplicate.json() == {"detail": "label already exists"}
+    assert malformed.status_code == 422
 
 
 def test_model_experiment_routes_map_errors_and_validate_bounds() -> None:

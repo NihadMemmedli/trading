@@ -177,6 +177,7 @@ The model experiment spine records split definitions and experiment results tied
 - `GET /modeling/splits/{split_definition_id}`
 - `GET /modeling/splits`
 - `POST /modeling/evaluations/baseline`
+- `POST /modeling/evaluations/baseline/materialize`
 - `POST /modeling/experiments`
 - `GET /modeling/experiments/{experiment_id}`
 - `GET /modeling/experiments`
@@ -190,7 +191,7 @@ The model experiment spine records split definitions and experiment results tied
 
 Split definitions support holdout and walk-forward windows with `train`, `validation`, and `test` ranges. The service validates persisted feature rows for each window and rejects splits where rows are unavailable at the window `decision_time`. Experiment records store dataset ID, feature set ID, split definition ID, parameters, code version, metrics, status, timestamps, and deterministic lineage hashes.
 
-Baseline evaluation currently supports the deterministic `previous_return_direction` benchmark. It reads existing feature rows by split window, uses the previous eligible row's `close_return_1` direction as the prediction for the current row, computes accuracy/confusion-count/rate metrics by split and overall, and persists the result as a succeeded model experiment.
+Baseline evaluation currently supports the deterministic `previous_return_direction` benchmark. It reads existing feature rows by split window, uses the previous eligible row's `close_return_1` direction as the prediction for the current row, computes accuracy/confusion-count/rate metrics by split and overall, and persists the result as a succeeded model experiment. The materialization endpoint uses the same deterministic row walk to optionally persist `close_return_1_direction` labels and baseline model predictions, and reports the experiment ID, prediction count, label count, skipped first-row count, and split/window counts.
 
 Labels are persisted separately from feature rows and reference feature-row identity plus the row hash; labels are never written into `features_json`. Model predictions reference a succeeded model experiment, feature set, feature row identity/hash, prediction value, confidence, decision timestamp, and lineage metadata. The promotion gate is a minimal metric-threshold check over a succeeded experiment's stored metrics.
 

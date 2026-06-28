@@ -452,6 +452,77 @@ def test_model_split_and_experiment_migration_service_and_api() -> None:
     assert baseline_experiment.metrics["overall"]["accuracy"] == 1.0
     assert baseline_experiment.metrics["by_split"]["train"]["observations"] == 1
 
+    baseline_materialization = service.evaluate_baseline_materialization(
+        BaselineEvaluationRequest(
+            dataset_id=dataset_id,
+            feature_set_id=feature_set_id,
+            split_definition_id=baseline_split.id,
+            name="service-previous-return-materialized",
+            parameters={"note": "integration-materialized"},
+            persist_predictions=True,
+            persist_labels=True,
+        )
+    )
+    assert baseline_materialization.experiment.dataset_id == dataset_id
+    assert baseline_materialization.experiment.split_definition_id == baseline_split.id
+    assert baseline_materialization.prediction_count == 3
+    assert baseline_materialization.label_count == 3
+    assert baseline_materialization.skipped_first_row_count == 3
+    assert baseline_materialization.split_counts["train"]["prediction_count"] == 1
+    assert baseline_materialization.window_counts[0].skipped_first_row_count == 1
+
+    with engine.begin() as connection:
+        persisted_baseline_labels = connection.execute(
+            sa.text(
+                "SELECT count(*) FROM labels "
+                "WHERE feature_set_id = :feature_set_id "
+                "AND label_name = 'close_return_1_direction'"
+            ),
+            {"feature_set_id": feature_set_id},
+        ).scalar_one()
+        persisted_baseline_predictions = connection.execute(
+            sa.text(
+                "SELECT count(*) FROM model_predictions "
+                "WHERE model_experiment_id = :model_experiment_id"
+            ),
+            {"model_experiment_id": str(baseline_materialization.experiment.id)},
+        ).scalar_one()
+        persisted_baseline_prediction_row = (
+            connection.execute(
+                sa.text(
+                    "SELECT prediction_value_json, confidence, lineage_json "
+                    "FROM model_predictions "
+                    "WHERE model_experiment_id = :model_experiment_id "
+                    "ORDER BY timestamp LIMIT 1"
+                ),
+                {"model_experiment_id": str(baseline_materialization.experiment.id)},
+            )
+            .mappings()
+            .one()
+        )
+
+    assert persisted_baseline_labels == 3
+    assert persisted_baseline_predictions == 3
+    assert persisted_baseline_prediction_row["prediction_value_json"]["source_feature"] == (
+        "close_return_1"
+    )
+    assert persisted_baseline_prediction_row["confidence"] == 1
+    assert persisted_baseline_prediction_row["lineage_json"]["producer"] == (
+        "previous_return_direction"
+    )
+
+    with pytest.raises(ModelingConflictError, match="label already exists"):
+        service.evaluate_baseline_materialization(
+            BaselineEvaluationRequest(
+                dataset_id=dataset_id,
+                feature_set_id=feature_set_id,
+                split_definition_id=baseline_split.id,
+                name="service-previous-return-duplicate-labels",
+                persist_predictions=False,
+                persist_labels=True,
+            )
+        )
+
     with engine.begin() as connection:
         split_table = connection.execute(
             sa.text("SELECT to_regclass('public.split_definitions')")
@@ -705,6 +776,20 @@ def test_model_split_and_experiment_migration_service_and_api() -> None:
         )
         assert create_baseline_response.status_code == 200
         api_baseline = create_baseline_response.json()
+        create_baseline_materialization_response = client.post(
+            "/modeling/evaluations/baseline/materialize",
+            json={
+                "dataset_id": dataset_id,
+                "feature_set_id": feature_set_id,
+                "split_definition_id": api_baseline_split["id"],
+                "name": "api-previous-return-materialized",
+                "parameters": {"note": "api-materialized"},
+                "persist_predictions": True,
+                "persist_labels": False,
+            },
+        )
+        assert create_baseline_materialization_response.status_code == 200
+        api_baseline_materialization = create_baseline_materialization_response.json()
         get_experiment_response = client.get(f"/modeling/experiments/{api_experiment['id']}")
         list_experiment_response = client.get(
             f"/modeling/experiments?split_definition_id={api_split['id']}&limit=10"
@@ -723,6 +808,9 @@ def test_model_split_and_experiment_migration_service_and_api() -> None:
     assert api_baseline["status"] == "succeeded"
     assert api_baseline["metrics"]["overall"]["observations"] == 3
     assert api_baseline["parameters"]["split_definition"]["id"] == api_baseline_split["id"]
+    assert api_baseline_materialization["prediction_count"] == 3
+    assert api_baseline_materialization["label_count"] == 0
+    assert api_baseline_materialization["skipped_first_row_count"] == 3
 
     with engine.begin() as connection:
         connection.execute(
