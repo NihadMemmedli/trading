@@ -115,6 +115,21 @@ They still include `dataset_id` and `dataset_hash` when lineage is available. Hi
 runs created before artifact or dataset lineage persistence may return empty artifact arrays or
 `dataset_id: null`.
 
+Use `GET /datasets?limit=50` to inspect registered datasets created by ingestion or successful
+backtests, and `GET /datasets/{dataset_id}` to fetch one dataset record:
+
+```json
+{
+  "id": 42,
+  "name": "backtest:binance:BTC/USDT:1m:2026-01-01T00:00:00Z:2026-01-01T00:05:00Z:2026-01-01T01:00:00Z",
+  "dataset_hash": "dddd...",
+  "decision_time": "2026-01-01T01:00:00Z",
+  "artifact_id": null,
+  "created_at": "2026-01-02T00:00:00Z",
+  "backtest_run_count": 2
+}
+```
+
 ## Configuration
 
 Copy `.env.example` to `.env` for local development. Defaults are intentionally conservative:

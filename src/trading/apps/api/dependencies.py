@@ -9,6 +9,7 @@ from fastapi import Depends, Request
 from trading.core.settings import Settings
 from trading.db.session import create_db_engine, create_session_factory
 from trading.services.backtests import BacktestService
+from trading.services.datasets import DatasetService
 from trading.services.ingestion import IngestionService
 
 
@@ -28,6 +29,14 @@ def get_ingestion_service(settings: SettingsDependency) -> IngestionService:
 
 
 IngestionServiceDependency = Annotated[IngestionService, Depends(get_ingestion_service)]
+
+
+def get_dataset_service(settings: SettingsDependency) -> DatasetService:
+    engine = create_db_engine(settings)
+    return DatasetService(create_session_factory(engine))
+
+
+DatasetServiceDependency = Annotated[DatasetService, Depends(get_dataset_service)]
 
 
 def get_backtest_service(settings: SettingsDependency) -> BacktestService:

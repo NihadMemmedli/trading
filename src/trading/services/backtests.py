@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session, selectinload, sessionmaker
 
 from trading.backtesting import (
@@ -381,21 +382,23 @@ def _get_or_create_backtest_dataset(
     dataset_hash: str,
 ) -> Dataset:
     name = deterministic_backtest_dataset_name(request)
-    existing = session.execute(
-        select(Dataset).where(Dataset.name == name, Dataset.dataset_hash == dataset_hash)
+    inserted_id = session.execute(
+        pg_insert(Dataset)
+        .values(
+            name=name,
+            dataset_hash=dataset_hash,
+            decision_time=request.decision_time,
+            artifact_id=None,
+        )
+        .on_conflict_do_nothing(index_elements=["name", "dataset_hash"])
+        .returning(Dataset.id)
     ).scalar_one_or_none()
-    if existing is not None:
-        return existing
-
-    dataset = Dataset(
-        name=name,
-        dataset_hash=dataset_hash,
-        decision_time=request.decision_time,
-        artifact_id=None,
-    )
-    session.add(dataset)
-    session.flush()
-    return dataset
+    dataset_id = inserted_id
+    if dataset_id is None:
+        dataset_id = session.execute(
+            select(Dataset.id).where(Dataset.name == name, Dataset.dataset_hash == dataset_hash)
+        ).scalar_one()
+    return session.execute(select(Dataset).where(Dataset.id == dataset_id)).scalar_one()
 
 
 def deterministic_backtest_dataset_name(request: NormalizedBacktestRunRequest) -> str:
