@@ -82,7 +82,24 @@ class BacktestRunCreateRequest(BaseModel):
         )
 
 
-class BacktestRunResponse(BaseModel):
+class BacktestTradeResponse(BaseModel):
+    id: int
+    symbol: str
+    timestamp: datetime
+    side: str
+    quantity: Decimal
+    fill_price: Decimal
+    fee: Decimal
+    slippage: Decimal
+
+
+class BacktestEquityPointResponse(BaseModel):
+    id: int
+    timestamp: datetime
+    equity: Decimal
+
+
+class BacktestRunSummaryResponse(BaseModel):
     id: uuid.UUID
     status: BacktestRunStatus
     exchange: str
@@ -110,7 +127,7 @@ class BacktestRunResponse(BaseModel):
     updated_at: datetime
 
     @classmethod
-    def from_run(cls, run: BacktestRun) -> BacktestRunResponse:
+    def from_run(cls, run: BacktestRun) -> BacktestRunSummaryResponse:
         return cls(
             id=run.id,
             status=BacktestRunStatus(run.status),
@@ -140,5 +157,40 @@ class BacktestRunResponse(BaseModel):
         )
 
 
+class BacktestRunResponse(BacktestRunSummaryResponse):
+    report: dict[str, Any] | None
+    trades: list[BacktestTradeResponse] = Field(default_factory=list)
+    equity_curve: list[BacktestEquityPointResponse] = Field(default_factory=list)
+
+    @classmethod
+    def from_run(cls, run: BacktestRun) -> BacktestRunResponse:
+        summary = BacktestRunSummaryResponse.from_run(run).model_dump()
+        return cls(
+            **summary,
+            report=run.report_json,
+            trades=[
+                BacktestTradeResponse(
+                    id=trade.id,
+                    symbol=trade.symbol,
+                    timestamp=trade.timestamp,
+                    side=trade.side,
+                    quantity=trade.quantity,
+                    fill_price=trade.fill_price,
+                    fee=trade.fee,
+                    slippage=trade.slippage,
+                )
+                for trade in getattr(run, "trades", ())
+            ],
+            equity_curve=[
+                BacktestEquityPointResponse(
+                    id=point.id,
+                    timestamp=point.timestamp,
+                    equity=point.equity,
+                )
+                for point in getattr(run, "equity_points", ())
+            ],
+        )
+
+
 class BacktestRunListResponse(BaseModel):
-    runs: list[BacktestRunResponse] = Field(default_factory=list)
+    runs: list[BacktestRunSummaryResponse] = Field(default_factory=list)

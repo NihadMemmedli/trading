@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session, selectinload, sessionmaker
 
 from trading.backtesting import (
     BacktestConfig,
@@ -21,6 +21,12 @@ from trading.backtesting import (
     build_backtest_report,
     export_backtest_report_json,
     run_candle_backtest,
+)
+from trading.backtesting import (
+    BacktestTrade as EngineBacktestTrade,
+)
+from trading.backtesting import (
+    EquityPoint as EngineEquityPoint,
 )
 from trading.data.market import (
     MarketDataError,
@@ -31,7 +37,14 @@ from trading.data.market import (
     validate_symbol,
     validate_timeframe,
 )
-from trading.db.models import BacktestRun, Candle, Exchange, TradingPair
+from trading.db.models import (
+    BacktestEquityPoint,
+    BacktestRun,
+    BacktestTrade,
+    Candle,
+    Exchange,
+    TradingPair,
+)
 from trading.db.session import session_scope
 from trading.strategies import CandleStrategy, MovingAverageCrossoverStrategy, StrategyParameters
 
@@ -125,6 +138,8 @@ class BacktestService:
                 metrics_json=report_json["metrics"],
                 report_json=report_json,
                 artifact_path=artifact_path,
+                trades=result.trades,
+                equity_curve=result.equity_curve,
             )
         except Exception as exc:
             return self._persist_failed_run(
@@ -136,10 +151,17 @@ class BacktestService:
 
     def get_run(self, run_id: uuid.UUID) -> BacktestRun:
         with session_scope(self._session_factory) as session:
-            run = session.get(BacktestRun, run_id)
+            run = session.execute(
+                select(BacktestRun)
+                .options(
+                    selectinload(BacktestRun.trades),
+                    selectinload(BacktestRun.equity_points),
+                )
+                .where(BacktestRun.id == run_id)
+            ).scalar_one_or_none()
             if run is None:
                 raise BacktestRunNotFoundError(str(run_id))
-            session.expunge(run)
+            session.expunge_all()
             return run
 
     def list_runs(self, *, limit: int = 50) -> list[BacktestRun]:
@@ -217,6 +239,8 @@ class BacktestService:
         metrics_json: dict[str, Any],
         report_json: dict[str, Any],
         artifact_path: str,
+        trades: tuple[EngineBacktestTrade, ...],
+        equity_curve: tuple[EngineEquityPoint, ...],
     ) -> BacktestRun:
         return self._persist_run(
             request,
@@ -231,6 +255,8 @@ class BacktestService:
             report_json=report_json,
             artifact_path=artifact_path,
             error_message=None,
+            trades=trades,
+            equity_curve=equity_curve,
         )
 
     def _persist_failed_run(
@@ -254,6 +280,8 @@ class BacktestService:
             report_json=None,
             artifact_path=None,
             error_message=error_message,
+            trades=(),
+            equity_curve=(),
         )
 
     def _persist_run(
@@ -271,6 +299,8 @@ class BacktestService:
         report_json: dict[str, Any] | None,
         artifact_path: str | None,
         error_message: str | None,
+        trades: tuple[EngineBacktestTrade, ...],
+        equity_curve: tuple[EngineEquityPoint, ...],
     ) -> BacktestRun:
         with session_scope(self._session_factory) as session:
             run = BacktestRun(
@@ -300,9 +330,38 @@ class BacktestService:
             )
             session.add(run)
             session.flush()
-            session.refresh(run)
-            session.expunge(run)
-            return run
+            session.add_all(
+                BacktestTrade(
+                    run_id=run.id,
+                    symbol=trade.symbol,
+                    timestamp=trade.timestamp,
+                    side=trade.side,
+                    quantity=trade.quantity,
+                    fill_price=trade.fill_price,
+                    fee=trade.fee,
+                    slippage=trade.slippage,
+                )
+                for trade in trades
+            )
+            session.add_all(
+                BacktestEquityPoint(
+                    run_id=run.id,
+                    timestamp=point.timestamp,
+                    equity=point.equity,
+                )
+                for point in equity_curve
+            )
+            session.flush()
+            loaded_run = session.execute(
+                select(BacktestRun)
+                .options(
+                    selectinload(BacktestRun.trades),
+                    selectinload(BacktestRun.equity_points),
+                )
+                .where(BacktestRun.id == run.id)
+            ).scalar_one()
+            session.expunge_all()
+            return loaded_run
 
 
 def build_backtest_strategy(

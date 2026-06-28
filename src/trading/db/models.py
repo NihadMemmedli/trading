@@ -144,6 +144,75 @@ class BacktestRun(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
     )
 
+    trades: Mapped[list[BacktestTrade]] = relationship(
+        back_populates="run",
+        cascade="all, delete-orphan",
+        order_by="BacktestTrade.timestamp, BacktestTrade.id",
+    )
+    equity_points: Mapped[list[BacktestEquityPoint]] = relationship(
+        back_populates="run",
+        cascade="all, delete-orphan",
+        order_by="BacktestEquityPoint.timestamp",
+    )
+
+
+class BacktestTrade(Base):
+    __tablename__ = "backtest_trades"
+    __table_args__ = (
+        CheckConstraint("side IN ('buy', 'sell')", name="backtest_trade_side_valid"),
+        CheckConstraint("quantity >= 0", name="backtest_trade_quantity_nonnegative"),
+        CheckConstraint("fill_price >= 0", name="backtest_trade_fill_price_nonnegative"),
+        CheckConstraint("fee >= 0", name="backtest_trade_fee_nonnegative"),
+        CheckConstraint("slippage >= 0", name="backtest_trade_slippage_nonnegative"),
+        Index("ix_backtest_trades_run_id_timestamp", "run_id", "timestamp"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("backtest_runs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    symbol: Mapped[str] = mapped_column(String(64), nullable=False)
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    side: Mapped[str] = mapped_column(String(8), nullable=False)
+    quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    fill_price: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    fee: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    slippage: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    run: Mapped[BacktestRun] = relationship(back_populates="trades")
+
+
+class BacktestEquityPoint(Base):
+    __tablename__ = "backtest_equity_points"
+    __table_args__ = (
+        CheckConstraint("equity >= 0", name="backtest_equity_point_equity_nonnegative"),
+        Index(
+            "ix_backtest_equity_points_run_id_timestamp",
+            "run_id",
+            "timestamp",
+            unique=True,
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("backtest_runs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    equity: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    run: Mapped[BacktestRun] = relationship(back_populates="equity_points")
+
 
 class RawArtifact(Base):
     __tablename__ = "raw_artifacts"

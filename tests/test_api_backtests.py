@@ -39,12 +39,35 @@ class FakeBacktestService:
             "result_hash": "r" * 64,
             "report_hash": "a" * 64,
             "metrics_json": {"trades_count": 1, "final_equity": "1001"},
+            "report_json": {
+                "report_hash": "a" * 64,
+                "metrics": {"trades_count": 1, "final_equity": "1001"},
+            },
             "artifact_path": "/reports/report.json",
             "started_at": self.created,
             "completed_at": self.created,
             "error_message": None,
             "created_at": self.created,
             "updated_at": self.created,
+            "trades": [
+                SimpleNamespace(
+                    id=1,
+                    symbol="BTC/USDT",
+                    timestamp=datetime(2026, 1, 1, 0, 1, tzinfo=UTC),
+                    side="buy",
+                    quantity=Decimal("1"),
+                    fill_price=Decimal("100"),
+                    fee=Decimal("0.1"),
+                    slippage=Decimal("0.2"),
+                )
+            ],
+            "equity_points": [
+                SimpleNamespace(
+                    id=1,
+                    timestamp=datetime(2026, 1, 1, tzinfo=UTC),
+                    equity=Decimal("1000"),
+                )
+            ],
         }
         defaults.update(overrides)
         return SimpleNamespace(**defaults)
@@ -109,19 +132,50 @@ def test_create_backtest_run_returns_persisted_response() -> None:
     assert body["symbol"] == "BTC/USDT"
     assert body["strategy_parameters"] == {"short_window": 1, "long_window": 2}
     assert body["metrics"] == {"trades_count": 1, "final_equity": "1001"}
+    assert body["report"] == {
+        "report_hash": "a" * 64,
+        "metrics": {"trades_count": 1, "final_equity": "1001"},
+    }
+    assert body["trades"] == [
+        {
+            "id": 1,
+            "symbol": "BTC/USDT",
+            "timestamp": "2026-01-01T00:01:00Z",
+            "side": "buy",
+            "quantity": "1",
+            "fill_price": "100",
+            "fee": "0.1",
+            "slippage": "0.2",
+        }
+    ]
+    assert body["equity_curve"] == [
+        {
+            "id": 1,
+            "timestamp": "2026-01-01T00:00:00Z",
+            "equity": "1000",
+        }
+    ]
     assert body["artifact_path"] == "/reports/report.json"
 
 
-def test_get_and_list_backtest_runs() -> None:
+def test_get_backtest_run_returns_expanded_details_and_list_stays_summary_only() -> None:
     with client_with_fake_service() as client:
         get_response = client.get("/backtests/runs/00000000-0000-4000-8000-000000000011")
         missing_response = client.get("/backtests/runs/00000000-0000-4000-8000-000000000012")
         list_response = client.get("/backtests/runs?limit=1")
 
     assert get_response.status_code == 200
+    get_body = get_response.json()
+    assert get_body["report"]["report_hash"] == "a" * 64
+    assert get_body["trades"][0]["timestamp"] == "2026-01-01T00:01:00Z"
+    assert get_body["equity_curve"][0]["timestamp"] == "2026-01-01T00:00:00Z"
     assert missing_response.status_code == 404
     assert list_response.status_code == 200
-    assert len(list_response.json()["runs"]) == 1
+    list_body = list_response.json()
+    assert len(list_body["runs"]) == 1
+    assert "report" not in list_body["runs"][0]
+    assert "trades" not in list_body["runs"][0]
+    assert "equity_curve" not in list_body["runs"][0]
 
 
 def test_backtest_request_rejects_order_like_fields_and_non_utc_generated_at() -> None:
