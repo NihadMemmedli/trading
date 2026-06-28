@@ -47,6 +47,69 @@ make services-logs
 make services-down
 ```
 
+## Backtest API Examples
+
+Backtest runs require DB-backed candle data for the requested exchange, symbol, timeframe, and
+point-in-time decision cutoff. Start local services, run the API, then create a deterministic
+moving-average run:
+
+```bash
+curl -sS -X POST http://localhost:8000/backtests/runs \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "exchange": "binance",
+    "symbol": "BTC/USDT",
+    "timeframe": "1m",
+    "start": "2026-01-01T00:00:00Z",
+    "end": "2026-01-01T00:05:00Z",
+    "decision_time": "2026-01-01T01:00:00Z",
+    "generated_at": "2026-01-02T00:00:00Z",
+    "initial_capital": "1000",
+    "fee_bps": "1",
+    "slippage_bps": "2",
+    "strategy_name": "moving_average_crossover",
+    "strategy_parameters": {
+      "short_window": 1,
+      "long_window": 2
+    }
+  }'
+```
+
+`POST /backtests/runs` and `GET /backtests/runs/{run_id}` return full run details, including
+the reproducible report JSON, persisted trades, and persisted equity curve:
+
+```json
+{
+  "id": "00000000-0000-4000-8000-000000000011",
+  "status": "succeeded",
+  "metrics": {"trades_count": 1, "final_equity": "1001"},
+  "report": {"report_hash": "...", "metrics": {"trades_count": 1}},
+  "trades": [
+    {
+      "id": 1,
+      "symbol": "BTC/USDT",
+      "timestamp": "2026-01-01T00:01:00Z",
+      "side": "buy",
+      "quantity": "1",
+      "fill_price": "100",
+      "fee": "0.1",
+      "slippage": "0.2"
+    }
+  ],
+  "equity_curve": [
+    {
+      "id": 1,
+      "timestamp": "2026-01-01T00:00:00Z",
+      "equity": "1000"
+    }
+  ]
+}
+```
+
+Use `GET /backtests/runs?limit=50` for a lightweight run list. List responses intentionally omit
+`report`, `trades`, and `equity_curve`; fetch a specific run when those artifacts are needed.
+Historical succeeded runs created before artifact persistence may return empty artifact arrays.
+
 ## Configuration
 
 Copy `.env.example` to `.env` for local development. Defaults are intentionally conservative:
